@@ -8,9 +8,13 @@
 //! memory, so Riri can report:
 //!
 //! - **data races** on global and shared memory (happens-before via
-//!   `sync_threads` barriers within a block; no ordering across blocks),
+//!   `sync_threads` barriers within a block and full-mask warp collectives
+//!   within a warp; no ordering across blocks),
 //! - **barrier divergence** (some threads of a block wait at a barrier that
 //!   other threads of the same block never reach),
+//! - **warp divergence** at a collective: a lane named by a shuffle's member
+//!   mask never reaches it, so the warp can never reconverge (see [`warp`]),
+//! - **mismatched member masks** and **shuffles from a non-member lane**,
 //! - **uninitialised shared-memory reads**,
 //! - **out-of-bounds accesses** and **kernel panics** (reported as traps).
 //!
@@ -39,9 +43,10 @@ mod launch;
 mod mem;
 mod sched;
 mod shadow;
+pub mod warp;
 
 pub use ctx::ThreadCtx;
-pub use diag::{Access, AccessKind, Diagnostic, MemSpace, Report};
+pub use diag::{Access, AccessKind, Diagnostic, LaneProblem, MemSpace, Report};
 pub use dim::Dim3;
-pub use launch::{launch, LaunchConfig};
+pub use launch::{launch, LaunchConfig, MAX_THREADS};
 pub use mem::{GlobalBuf, SharedArray};

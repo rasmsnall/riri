@@ -22,6 +22,10 @@ pub struct Access {
     pub thread: u32,
     /// Barrier generation of the block when the access happened.
     pub epoch: u64,
+    /// Warp index within the block.
+    pub warp: u32,
+    /// Collective generation of the warp when the access happened.
+    pub warp_epoch: u64,
     pub kind: AccessKind,
     /// Source location of the access in the kernel.
     pub location: &'static Location<'static>,
@@ -41,6 +45,64 @@ impl fmt::Display for MemSpace {
             MemSpace::Shared { block, name } => write!(f, "shared `{name}` (block {block})"),
         }
     }
+}
+
+/// Ways a lane can name the wrong threads in a warp collective.
+///
+/// These are undefined behaviour in CUDA rather than merely surprising, so
+/// Riri treats the first two as fatal and ends the launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LaneProblem {
+    /// The calling lane left itself out of its own member mask.
+    CallerNotInMask,
+    /// The mask names lanes that do not exist, because the block does not
+    /// fill this warp. `valid` is the mask of lanes that do exist.
+    MaskOutsideBlock { valid: u32 },
+    /// A shuffle read from a lane that is not a member of the mask, so the
+    /// value it would return was never contributed.
+    SourceLaneNotInMask { src: u32 },
+}
+
+impl fmt::Display for LaneProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LaneProblem::CallerNotInMask => {
+                write!(f, "the calling lane is not a member of its own mask")
+            }
+            LaneProblem::MaskOutsideBlock { valid } => write!(
+                f,
+                "the mask names lanes outside the block (lanes {} exist)",
+                lane_list(*valid)
+            ),
+            LaneProblem::SourceLaneNotInMask { src } => {
+                write!(f, "source lane {src} is not a member of the mask")
+            }
+        }
+    }
+}
+
+/// Renders a lane bitmask as a compact list, e.g. `0-15,31`.
+pub(crate) fn lane_list(mask: u32) -> String {
+    if mask == 0 {
+        return "none".to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut lane = 0u32;
+    while lane < 32 {
+        if mask & (1u32 << lane) != 0 {
+            let start = lane;
+            while lane + 1 < 32 && mask & (1u32 << (lane + 1)) != 0 {
+                lane += 1;
+            }
+            if start == lane {
+                parts.push(format!("{start}"));
+            } else {
+                parts.push(format!("{start}-{lane}"));
+            }
+        }
+        lane += 1;
+    }
+    parts.join(",")
 }
 
 /// A problem Riri found while executing a kernel.
@@ -72,6 +134,44 @@ pub enum Diagnostic {
         /// Where the waiting threads are blocked.
         barrier: &'static Location<'static>,
     },
+    /// A warp collective was reached by only some of the lanes its mask
+    /// names. The missing lanes branched elsewhere, exited, or stopped at a
+    /// different collective, so the warp can never reconverge here.
+    WarpDivergence {
+        block: u32,
+        /// Warp index within the block.
+        warp: u32,
+        /// Name of the collective, e.g. `shfl_down_sync`.
+        op: &'static str,
+        /// Member mask the waiting lanes passed.
+        mask: u32,
+        /// Lanes that actually reached this collective.
+        arrived: u32,
+        /// Where the waiting lanes are blocked.
+        at: &'static Location<'static>,
+    },
+    /// Two lanes reached the same collective with different member masks.
+    /// Every participant must agree on who is taking part.
+    WarpMaskMismatch {
+        block: u32,
+        warp: u32,
+        op: &'static str,
+        at: &'static Location<'static>,
+        lane: u32,
+        mask: u32,
+        other_lane: u32,
+        other_mask: u32,
+    },
+    /// A lane named a set of threads that cannot be honoured.
+    WarpLaneError {
+        block: u32,
+        warp: u32,
+        op: &'static str,
+        at: &'static Location<'static>,
+        lane: u32,
+        mask: u32,
+        problem: LaneProblem,
+    },
     KernelPanic {
         block: u32,
         thread: u32,
@@ -99,11 +199,9 @@ impl fmt::Display for Diagnostic {
                 who(first),
                 who(second)
             ),
-            Diagnostic::UninitRead { space, index, access } => write!(
-                f,
-                "read of uninitialised {space}[{index}] by {}",
-                who(access)
-            ),
+            Diagnostic::UninitRead { space, index, access } => {
+                write!(f, "read of uninitialised {space}[{index}] by {}", who(access))
+            }
             Diagnostic::OutOfBounds { space, index, len, access } => write!(
                 f,
                 "out-of-bounds access {space}[{index}] (len {len}) by {}",
@@ -114,6 +212,39 @@ impl fmt::Display for Diagnostic {
                 "barrier divergence in block {block}: {waiting} thread(s) wait at {}:{} but {exited} thread(s) exited without reaching it",
                 barrier.file(),
                 barrier.line()
+            ),
+            Diagnostic::WarpDivergence { block, warp, op, mask, arrived, at } => write!(
+                f,
+                "warp divergence in block {block} warp {warp}: `{op}` at {}:{} names lanes {} but only lanes {} arrived, so lanes {} never reach it",
+                at.file(),
+                at.line(),
+                lane_list(*mask),
+                lane_list(*arrived),
+                lane_list(mask & !arrived)
+            ),
+            Diagnostic::WarpMaskMismatch {
+                block,
+                warp,
+                op,
+                at,
+                lane,
+                mask,
+                other_lane,
+                other_mask,
+            } => write!(
+                f,
+                "warp mask mismatch in block {block} warp {warp}: `{op}` at {}:{} was called by lane {lane} with lanes {} but by lane {other_lane} with lanes {}",
+                at.file(),
+                at.line(),
+                lane_list(*mask),
+                lane_list(*other_mask)
+            ),
+            Diagnostic::WarpLaneError { block, warp, op, at, lane, mask, problem } => write!(
+                f,
+                "invalid warp collective in block {block} warp {warp}: lane {lane} called `{op}` at {}:{} with lanes {} but {problem}",
+                at.file(),
+                at.line(),
+                lane_list(*mask)
             ),
             Diagnostic::KernelPanic { block, thread, message } => {
                 write!(f, "kernel panic in block {block} thread {thread}: {message}")
@@ -139,6 +270,11 @@ impl Report {
 
     pub fn has_race(&self) -> bool {
         self.diagnostics.iter().any(|d| matches!(d, Diagnostic::DataRace { .. }))
+    }
+
+    /// True if any lane reached a warp collective that its warp-mates did not.
+    pub fn has_warp_divergence(&self) -> bool {
+        self.diagnostics.iter().any(|d| matches!(d, Diagnostic::WarpDivergence { .. }))
     }
 
     /// Panics with a readable listing if any diagnostic was reported.
@@ -192,6 +328,15 @@ impl Reporter {
             Diagnostic::OutOfBounds { access, .. } => ("oob".into(), access.location, None),
             Diagnostic::BarrierDivergence { block, barrier, .. } => {
                 (format!("barrier{block}"), barrier, None)
+            }
+            Diagnostic::WarpDivergence { block, warp, at, .. } => {
+                (format!("warpdiv{block}:{warp}"), at, None)
+            }
+            Diagnostic::WarpMaskMismatch { block, warp, at, .. } => {
+                (format!("warpmask{block}:{warp}"), at, None)
+            }
+            Diagnostic::WarpLaneError { problem, at, .. } => {
+                (format!("warplane{problem:?}"), at, None)
             }
             Diagnostic::KernelPanic { message, .. } => {
                 (format!("panic:{message}"), Location::caller(), None)

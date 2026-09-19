@@ -1,14 +1,19 @@
 //! Shadow memory: per-element access history used for race detection.
 //!
-//! Happens-before model (v0.1):
+//! Happens-before model (v0.2):
 //! - Within a block, `sync_threads()` orders everything before it against
 //!   everything after it. Each barrier bumps the block's *epoch*.
+//! - Within a warp, a full-mask warp collective (`sync_warp`, a shuffle, a
+//!   ballot) does the same for that warp alone, bumping its *warp epoch*.
+//!   A partial mask bumps nothing, since it says nothing about the lanes it
+//!   leaves out.
 //! - Across blocks there is no ordering at all within one launch.
 //! - Two accesses from the same thread are always ordered.
 //! - Two atomics never race with each other.
 //!
 //! So two accesses are *concurrent* iff they come from different threads and
-//! either from different blocks or from the same block in the same epoch.
+//! either from different blocks, or from the same block in the same epoch
+//! and either in different warps or in the same warp epoch.
 
 use crate::diag::{Access, AccessKind};
 
@@ -17,9 +22,22 @@ use crate::diag::{Access, AccessKind};
 const MAX_READERS: usize = 8;
 
 pub(crate) fn concurrent(a: &Access, b: &Access) -> bool {
-    let same_thread = a.block == b.block && a.thread == b.thread;
-    let both_atomic = a.kind == AccessKind::Atomic && b.kind == AccessKind::Atomic;
-    !same_thread && !both_atomic && (a.block != b.block || a.epoch == b.epoch)
+    if a.block == b.block && a.thread == b.thread {
+        return false;
+    }
+    if a.kind == AccessKind::Atomic && b.kind == AccessKind::Atomic {
+        return false;
+    }
+    if a.block != b.block {
+        return true;
+    }
+    if a.epoch != b.epoch {
+        return false;
+    }
+    if a.warp != b.warp {
+        return true;
+    }
+    a.warp_epoch == b.warp_epoch
 }
 
 #[derive(Clone, Default)]
@@ -70,8 +88,20 @@ mod tests {
     use super::*;
     use std::panic::Location;
 
+    /// An access in warp 0 at warp epoch 0, for the block-level tests.
     fn acc(block: u32, thread: u32, epoch: u64, kind: AccessKind) -> Access {
-        Access { block, thread, epoch, kind, location: Location::caller() }
+        warp_acc(block, thread, epoch, 0, 0, kind)
+    }
+
+    fn warp_acc(
+        block: u32,
+        thread: u32,
+        epoch: u64,
+        warp: u32,
+        warp_epoch: u64,
+        kind: AccessKind,
+    ) -> Access {
+        Access { block, thread, epoch, warp, warp_epoch, kind, location: Location::caller() }
     }
 
     #[test]
@@ -108,5 +138,20 @@ mod tests {
         let mut c = Cell::initialised();
         c.on_read(acc(0, 0, 0, AccessKind::Read));
         assert!(c.on_write(acc(0, 1, 0, AccessKind::Write)).is_some());
+    }
+
+    #[test]
+    fn warp_collective_orders_accesses_in_that_warp() {
+        let mut c = Cell::initialised();
+        c.on_write(warp_acc(0, 0, 0, 0, 0, AccessKind::Write));
+        assert!(c.on_read(warp_acc(0, 1, 0, 0, 1, AccessKind::Read)).is_none());
+    }
+
+    #[test]
+    fn warp_collective_does_not_order_other_warps() {
+        let mut c = Cell::initialised();
+        c.on_write(warp_acc(0, 0, 0, 0, 1, AccessKind::Write));
+        // Warp 1 never took part, so its accesses are still concurrent.
+        assert!(c.on_read(warp_acc(0, 32, 0, 1, 0, AccessKind::Read)).is_some());
     }
 }

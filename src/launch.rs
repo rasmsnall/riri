@@ -8,23 +8,26 @@ use crate::ctx::ThreadCtx;
 use crate::diag::{Diagnostic, Report, Reporter};
 use crate::dim::Dim3;
 use crate::sched::{AbortSignal, Scheduler};
+use crate::warp::WARP_SIZE;
 
 /// Simulated threads are real OS threads, so keep launches test-sized.
 pub const MAX_THREADS: u32 = 16_384;
 
 static NEXT_LAUNCH_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Grid and block shape plus the scheduler seed.
+/// Grid and block shape, warp width, and the scheduler seed.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchConfig {
     pub grid: Dim3,
     pub block: Dim3,
     pub seed: u64,
+    /// Lanes per warp. Defaults to [`WARP_SIZE`].
+    pub warp_size: u32,
 }
 
 impl LaunchConfig {
     pub fn new(grid: impl Into<Dim3>, block: impl Into<Dim3>) -> Self {
-        LaunchConfig { grid: grid.into(), block: block.into(), seed: 0 }
+        LaunchConfig { grid: grid.into(), block: block.into(), seed: 0, warp_size: WARP_SIZE }
     }
 
     /// Sets the scheduler seed. Different seeds explore different
@@ -33,10 +36,30 @@ impl LaunchConfig {
         self.seed = seed;
         self
     }
+
+    /// Sets the number of lanes per warp.
+    ///
+    /// Must be a power of two no greater than 32, since member masks are
+    /// `u32`. Useful for writing small, readable warp tests; 64-lane AMD
+    /// wavefronts cannot be modelled with a `u32` mask and are not supported.
+    pub fn warp_size(mut self, lanes: u32) -> Self {
+        assert!(
+            lanes.is_power_of_two() && lanes <= 32,
+            "riri: warp size must be a power of two no greater than 32, got {lanes}"
+        );
+        self.warp_size = lanes;
+        self
+    }
 }
 
 pub(crate) struct BlockState {
     pub(crate) shared: Mutex<HashMap<&'static str, Arc<dyn Any + Send + Sync>>>,
+}
+
+/// Per-warp exchange slots, one per lane, used by warp collectives to hand
+/// values between lanes without going through instrumented memory.
+pub(crate) struct WarpState {
+    pub(crate) slots: Mutex<Vec<Option<Box<dyn Any + Send>>>>,
 }
 
 pub(crate) struct LaunchState {
@@ -45,13 +68,16 @@ pub(crate) struct LaunchState {
     pub(crate) sched: Scheduler,
     pub(crate) reporter: Reporter,
     pub(crate) blocks: Vec<BlockState>,
+    pub(crate) warps: Vec<WarpState>,
+    pub(crate) warps_per_block: usize,
 }
 
 /// Runs `kernel` once per simulated GPU thread and returns what Riri found.
 ///
 /// The kernel receives a [`ThreadCtx`] for its thread. All memory it touches
 /// must go through Riri's instrumented types ([`crate::GlobalBuf`],
-/// [`crate::SharedArray`]) to be checked.
+/// [`crate::SharedArray`]) to be checked, and all lane-to-lane exchange
+/// through [`crate::warp`].
 pub fn launch<F>(config: &LaunchConfig, kernel: F) -> Report
 where
     F: Fn(&ThreadCtx<'_>) + Sync,
@@ -59,18 +85,30 @@ where
     let blocks = config.grid.count();
     let tpb = config.block.count();
     assert!(blocks > 0 && tpb > 0, "riri: grid and block must be non-empty");
+    assert!(
+        config.warp_size.is_power_of_two() && config.warp_size <= 32,
+        "riri: warp size must be a power of two no greater than 32, got {}",
+        config.warp_size
+    );
     let total = blocks.checked_mul(tpb).expect("riri: launch too large");
     assert!(
         total <= MAX_THREADS,
         "riri: {total} threads exceeds the limit of {MAX_THREADS}; shrink the launch for testing"
     );
 
+    let ws = config.warp_size as usize;
+    let warps_per_block = (tpb as usize).div_ceil(ws);
+
     let state = LaunchState {
         id: NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed),
         config: *config,
-        sched: Scheduler::new(blocks as usize, tpb as usize, config.seed),
+        sched: Scheduler::new(blocks as usize, tpb as usize, ws, config.seed),
         reporter: Reporter::default(),
         blocks: (0..blocks).map(|_| BlockState { shared: Mutex::new(HashMap::new()) }).collect(),
+        warps: (0..blocks as usize * warps_per_block)
+            .map(|_| WarpState { slots: Mutex::new((0..ws).map(|_| None).collect()) })
+            .collect(),
+        warps_per_block,
     };
 
     std::thread::scope(|scope| {

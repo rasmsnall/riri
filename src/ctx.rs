@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::panic::Location;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::diag::{Access, AccessKind, Diagnostic};
 use crate::dim::Dim3;
@@ -50,6 +50,32 @@ impl<'l> ThreadCtx<'l> {
         self.gid
     }
 
+    // ------------------------------------------------------------ warps ---
+
+    /// Lanes per warp for this launch. 32 unless the launch config says
+    /// otherwise.
+    pub fn warp_size(&self) -> u32 {
+        self.launch.config.warp_size
+    }
+
+    /// Index of this thread's warp within its block.
+    pub fn warp_id(&self) -> u32 {
+        self.thread / self.warp_size()
+    }
+
+    /// This thread's lane within its warp, in `0..warp_size()`.
+    pub fn lane_id(&self) -> u32 {
+        self.thread % self.warp_size()
+    }
+
+    /// Mask of the lanes of this thread's warp that actually exist.
+    ///
+    /// This is the full mask except in a block whose size is not a multiple
+    /// of the warp size, where the last warp is short.
+    pub fn warp_valid_mask(&self) -> u32 {
+        self.launch.sched.valid_mask(self.warp_id() as usize)
+    }
+
     /// `__syncthreads()`. Every thread of the block must reach the same
     /// barrier; otherwise Riri reports barrier divergence.
     #[track_caller]
@@ -81,18 +107,46 @@ impl<'l> ThreadCtx<'l> {
     // ----- crate-internal instrumentation hooks -----
 
     pub(crate) fn schedule_point(&self) {
-        if self.launch.sched.yield_now(self.gid).is_err() {
+        if self.launch.sched.yield_now(self.gid, &self.launch.reporter).is_err() {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }
     }
 
     pub(crate) fn access(&self, kind: AccessKind, location: &'static Location<'static>) -> Access {
+        let warp = self.warp_id();
+        let (epoch, warp_epoch) = self.launch.sched.epochs(self.block as usize, warp as usize);
         Access {
             block: self.block,
             thread: self.thread,
-            epoch: self.launch.sched.epoch(self.block as usize),
+            epoch,
+            warp,
+            warp_epoch,
             kind,
             location,
+        }
+    }
+
+    /// The exchange slots this thread's warp uses to publish values to its
+    /// mask-mates during a collective.
+    pub(crate) fn warp_slots(&self) -> &Mutex<Vec<Option<Box<dyn Any + Send>>>> {
+        let index = self.block as usize * self.launch.warps_per_block + self.warp_id() as usize;
+        &self.launch.warps[index].slots
+    }
+
+    /// Parks at one half of a warp collective; unwinds if the launch aborts.
+    pub(crate) fn warp_rendezvous(
+        &self,
+        phase: u8,
+        mask: u32,
+        at: &'static Location<'static>,
+        op: &'static str,
+    ) {
+        let r = self
+            .launch
+            .sched
+            .warp_rendezvous(self.gid, phase, mask, at, op, &self.launch.reporter);
+        if r.is_err() {
+            std::panic::resume_unwind(Box::new(AbortSignal));
         }
     }
 
