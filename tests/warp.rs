@@ -229,7 +229,7 @@ fn some_lanes_at_a_barrier_others_at_a_shuffle() {
 #[test]
 fn divergence_is_caught_on_every_schedule() {
     // Convergence is checked structurally, not by hoping for an unlucky
-    // interleaving, so every seed must find it — and none may hang.
+    // interleaving, so every seed must find it, and none may hang.
     for seed in 0..32 {
         let report = launch(&LaunchConfig::new(1, 8).warp_size(8).seed(seed), |t| {
             if t.lane_id() % 2 == 0 {

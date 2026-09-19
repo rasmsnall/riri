@@ -1,5 +1,5 @@
 //! A classic block-level tree reduction, run twice: once correct, once with
-//! the barrier inside the loop "optimised away" — a bug that often passes on
+//! the barrier inside the loop "optimised away", a bug that often passes on
 //! real hardware because warps happen to run in lockstep.
 //!
 //! cargo run --example reduction

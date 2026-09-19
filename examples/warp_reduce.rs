@@ -1,5 +1,5 @@
 //! A warp-level reduction, run twice: once correct, once written the way
-//! warp-synchronous code often is — the shuffle tucked inside a branch so
+//! warp-synchronous code often is: the shuffle tucked inside a branch so
 //! that "only the lanes that still have work" call it, while the member mask
 //! still names the whole warp.
 //!
