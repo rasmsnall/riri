@@ -468,6 +468,10 @@ stable.
 
 - NVIDIA, *CUDA C++ Programming Guide*, warp shuffle functions and the member mask contract.
 - NVIDIA, *Compute Sanitizer User Manual*, `racecheck` and `synccheck`.
+- NVlabs, *cuda-oxide: The Safety Model*, chapter "The hard problems", which records that
+  `DisjointSlice` does not cover cooperative patterns and that warp convergence is not
+  enforceable by the type system today.
+  https://nvlabs.github.io/cuda-oxide/gpu-safety/the-safety-model.html
 - Köpcke, Gorlatch, Steuwer, *Descend: A Safe GPU Systems Programming Language*, PLDI 2024.
 - The Miri authors, *Miri: an interpreter for Rust's mid-level intermediate representation*.
 - Villard et al., *Tree Borrows*, the aliasing model targeted by Roadmap item 3.

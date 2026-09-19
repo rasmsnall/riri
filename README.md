@@ -182,13 +182,29 @@ Item 0, a warp model with shuffle convergence checks, shipped in v0.2.
 
 ## Why this exists
 
-Projects like [cuda-oxide](https://github.com/NVlabs/cuda-oxide) make the common case safe,
-where one thread writes one element. Cooperative patterns such as shared-memory reductions,
-scans, and producer/consumer pipelines still need `unsafe`, and cuda-oxide's own
-documentation records that its `DisjointSlice` does not cover them.
+cuda-oxide makes the common case safe, where one thread writes one element under a checked
+launch contract. Its documentation keeps an explicit list of what it does not enforce,
+under the heading [The hard problems](https://nvlabs.github.io/cuda-oxide/gpu-safety/the-safety-model.html).
+Two entries on that list are what Riri is for.
 
-The only dynamic check for those today is NVIDIA Compute Sanitizer, which needs a real GPU
-and knows nothing about Rust's semantics. Riri aims to be to GPU kernels what Miri is to
+**Shared memory access patterns.** `DisjointSlice` solves the unique-index-write pattern
+but not cooperative ones: reductions, scans, and producer/consumer pipelines, where threads
+deliberately touch overlapping regions with synchronisation between phases. Those stay in
+the tier that needs `unsafe`.
+
+**Warp-level convergence.** Collectives such as `shfl_sync` and `ballot_sync` require every
+lane in the participation mask to be converged at the call site, and cuda-oxide records
+that the type system cannot enforce this today. Pass a full mask from a diverged warp and
+the result is, in their words, "a silent hang", with no crash and no message.
+
+Both are stated as solvable rather than permanent, so the type-level answer may well arrive.
+Riri is the dynamic complement in the meantime, and dynamic checking keeps its value
+afterwards for the same reason Miri still matters: types rule out what they can prove, and
+something has to check the rest. A warp that cannot reconverge is reported here as a
+diagnostic naming the missing lanes, rather than as a kernel that never finishes.
+
+The only dynamic check for any of this today is NVIDIA Compute Sanitizer, which needs a real
+GPU and knows nothing about Rust's semantics. Riri aims to be to GPU kernels what Miri is to
 CPU `unsafe` code: a tool that runs in CI and names the line.
 
 ## Prior art
