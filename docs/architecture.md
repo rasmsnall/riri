@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.6
+**Version** 1.7
 **Date** 2026-09-20
 
 ---
@@ -611,6 +611,9 @@ same element is an ordinary data race naming both lines.
 | `thread::sync_threads` | Covered |
 | `DisjointSlice::get_mut_indexed`, `get_mut`, `get_unchecked_mut`, `len` | Covered |
 | `warp` shuffles, votes, `lane_id`, `warp_id` | Covered, unsuffixed forms only |
+| `DeviceAtomic` load, store, swap, fetch, compare-exchange | Covered, indexed through `DeviceAtomicSlice` |
+| `threadfence`, `threadfence_system` | Covered, device scope |
+| `threadfence_block` | Absent: block scope would need scoped clocks, and a device fence in its place would hide a bug |
 | `SharedArray`, `DynamicSharedArray` | Absent by decision, see Section 5 |
 | 2D and tiled index spaces, managed barriers, clusters, TMA | Absent |
 

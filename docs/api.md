@@ -1,10 +1,10 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.6.0.
+**Status** Complete. Describes the surface as built, at version 0.7.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.6
+**Version** 1.7
 **Date** 2026-09-20
 
 ---
@@ -51,8 +51,9 @@
   - 1. `oxide::launch`
   - 2. `thread`
   - 3. `DisjointSlice`
-  - 4. `warp`
-  - 5. What is not covered
+  - 4. Atomics and fences
+  - 5. `warp`
+  - 6. What is not covered
 - IX. Worked Examples
   - 1. A clean vector add
   - 2. A shared-memory reduction
@@ -268,10 +269,20 @@ There is no `to_vec`, because shared memory does not outlive the launch.
 ```rust
 a.atomic_load(t, i, ordering) -> T
 a.atomic_store(t, i, value, ordering)
-a.atomic_add(t, i, value, ordering) -> T      // returns the previous value
+a.atomic_swap(t, i, value, ordering) -> T                   // returns the previous value
+a.atomic_add(t, i, value, ordering) -> T
+a.atomic_sub(t, i, value, ordering) -> T
+a.atomic_min(t, i, value, ordering) -> T
+a.atomic_max(t, i, value, ordering) -> T
+a.atomic_compare_exchange(t, i, current, new, ordering) -> Result<T, T>
 ```
 
-`atomic_add` is available where `T: Add<Output = T>`. Atomics never conflict with each other
+Each carries the trait bound its operation needs: `Add` for `atomic_add`, `Ord` for min and
+max, `PartialEq` for the compare-and-exchange. `compare_exchange` returns the previous value
+either way, `Ok` when the exchange happened and `Err` when it did not, matching `std`.
+
+All of them are one read-modify-write held across a single scheduling point, so nothing can
+interleave between reading the old value and writing the new one. Atomics never conflict with each other
 at any scope, including across blocks, but they do conflict with concurrent plain reads and
 writes, which is the bug this models.
 
@@ -633,7 +644,28 @@ blocks drops its tail. `get_unchecked_mut` traps instead, matching the unchecked
 and is the one worth running under Riri: it asserts the index belongs to the calling thread
 alone, and two threads claiming one element is reported as a data race naming both lines.
 
-### 4. `warp`
+### 4. Atomics and fences
+
+```rust
+let counters = DeviceAtomicSlice::new(&buf);
+counters[i].fetch_add(1, AtomicOrdering::Relaxed);
+```
+
+`AtomicOrdering` is cuda-oxide's spelling of `Ordering`, with the same five cases.
+`DeviceAtomic<T>` carries `load`, `store`, `swap`, `fetch_add`, `fetch_sub`, `fetch_min`,
+`fetch_max` and `compare_exchange`, with cuda-oxide's signatures, which take no context
+argument. `DeviceAtomicSlice<T>` indexes to one, so the line a kernel writes needs no
+changing.
+
+`threadfence()` and `threadfence_system()` are the device-scope fence; within one launch
+there is no host or peer to order against, so they are the same thing.
+
+`threadfence_block` is deliberately absent. It orders only within a block, Riri's clocks are
+not scoped that way, and treating it as a device fence would report a kernel clean that
+relied on it for cross-block visibility. A function that does not exist is better than one
+that gives the wrong answer.
+
+### 5. `warp`
 
 `lane_id`, `warp_id`, `shuffle`, `shuffle_up`, `shuffle_down`, `shuffle_xor` (each with an
 `_f32` form), `all`, `any`, `ballot`, `popc`.
@@ -642,13 +674,14 @@ cuda-oxide's unsuffixed forms take no member mask, so Riri supplies the whole wa
 what the instruction they lower to assumes. A warp that is not converged at one of these is
 therefore reported, which is the bug those forms invite.
 
-### 5. What is not covered
+### 6. What is not covered
 
 - **Shared memory.** cuda-oxide's `SharedArray` is a zero-sized marker whose storage its
   compiler provides and whose accessors all panic off-device, so Riri would have to supply
   storage of its own, and handing out references into it would need `unsafe`. Left out
   deliberately. Use `ThreadCtx::shared`. See `architecture.md`, Chapter IX, Section 5.
-- The `_sync` shuffle forms, 2D and tiled index spaces, managed barriers, clusters, TMA.
+- `threadfence_block`, the `_sync` shuffle forms, 2D and tiled index spaces, managed
+  barriers, clusters, TMA.
 - `cuda-device` is unpublished and pins a nightly toolchain, so this surface is written from
   the published API reference rather than compiled against the real crate. Treat a signature
   mismatch as a bug in Riri.

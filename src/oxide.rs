@@ -68,6 +68,7 @@ use crate::diag::Report;
 use crate::launch::{LaunchConfig, LaunchState};
 use crate::mem::{ElemMut, GlobalBuf};
 use crate::sched::{Choices, SplitMix64};
+use crate::sync::Ordering;
 
 struct Bound {
     state: Arc<LaunchState>,
@@ -323,6 +324,144 @@ impl<T: Copy + Send + 'static> DisjointSlice<T> {
         let at = Location::caller();
         with_ctx(|t| self.buf.elem_mut(t, index, false, at))
             .expect("riri: unchecked access is never None")
+    }
+}
+
+/// How an atomic orders the accesses around it, spelled as cuda-oxide spells
+/// it. The same five cases as [`crate::Ordering`], which this converts to.
+pub type AtomicOrdering = Ordering;
+
+/// `__threadfence()`: orders this thread's accesses against the atomics
+/// around it, at device scope.
+///
+/// Riri models device scope, which within one launch is everything there is,
+/// so [`threadfence_system`] is the same function. `threadfence_block` is
+/// deliberately absent: it orders only within a block, Riri's clocks are not
+/// scoped that way, and treating it as a device fence would report a kernel
+/// clean that relied on it for cross-block visibility. A missing function is
+/// better than a wrong answer.
+pub fn threadfence() {
+    with_ctx(|t| t.threadfence());
+}
+
+/// `__threadfence_system()`. See [`threadfence`]: within a single launch
+/// there is no host or peer device to order against, so this is that.
+pub fn threadfence_system() {
+    with_ctx(|t| t.threadfence());
+}
+
+/// One atomically accessed element of device memory.
+///
+/// cuda-oxide gives a kernel these through its data, as `DeviceAtomicU32` and
+/// friends, and calls methods on them with no context argument. The same
+/// methods are here with the same signatures, so the lines that use them need
+/// no changing. What differs is where one comes from: under Riri it names an
+/// element of an instrumented buffer, usually through [`DeviceAtomicSlice`].
+pub struct DeviceAtomic<T> {
+    buf: GlobalBuf<T>,
+    index: usize,
+}
+
+impl<T: Copy + Send + 'static> DeviceAtomic<T> {
+    /// Names one element of `buf` as atomically accessed.
+    pub fn at(buf: &GlobalBuf<T>, index: usize) -> Self {
+        DeviceAtomic {
+            buf: buf.clone(),
+            index,
+        }
+    }
+
+    #[track_caller]
+    pub fn load(&self, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_load_at(t, self.index, order, at))
+    }
+
+    #[track_caller]
+    pub fn store(&self, val: T, order: AtomicOrdering) {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_store_at(t, self.index, val, order, at));
+    }
+
+    #[track_caller]
+    pub fn swap(&self, val: T, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_swap_at(t, self.index, val, order, at))
+    }
+}
+
+impl<T: Copy + Send + PartialEq + 'static> DeviceAtomic<T> {
+    #[track_caller]
+    pub fn compare_exchange(&self, current: T, new: T, order: AtomicOrdering) -> Result<T, T> {
+        let at = Location::caller();
+        with_ctx(|t| {
+            self.buf
+                .atomic_compare_exchange_at(t, self.index, current, new, order, at)
+        })
+    }
+}
+
+impl<T: Copy + Send + Ord + 'static> DeviceAtomic<T> {
+    #[track_caller]
+    pub fn fetch_min(&self, val: T, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_min_at(t, self.index, val, order, at))
+    }
+
+    #[track_caller]
+    pub fn fetch_max(&self, val: T, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_max_at(t, self.index, val, order, at))
+    }
+}
+
+impl<T: Copy + Send + std::ops::Add<Output = T> + 'static> DeviceAtomic<T> {
+    #[track_caller]
+    pub fn fetch_add(&self, val: T, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_add_at(t, self.index, val, order, at))
+    }
+}
+
+impl<T: Copy + Send + std::ops::Sub<Output = T> + 'static> DeviceAtomic<T> {
+    #[track_caller]
+    pub fn fetch_sub(&self, val: T, order: AtomicOrdering) -> T {
+        let at = Location::caller();
+        with_ctx(|t| self.buf.atomic_sub_at(t, self.index, val, order, at))
+    }
+}
+
+/// A run of atomics, indexed the way a kernel indexes them.
+///
+/// `counters[i].fetch_add(1, AtomicOrdering::Relaxed)` reads the same here as
+/// it does against cuda-oxide, which is the point. The handles are real
+/// objects, so indexing can hand out a reference to one; each proxies to its
+/// element of the instrumented buffer.
+pub struct DeviceAtomicSlice<T> {
+    handles: Vec<DeviceAtomic<T>>,
+}
+
+impl<T: Copy + Send + 'static> DeviceAtomicSlice<T> {
+    pub fn new(buf: &GlobalBuf<T>) -> Self {
+        DeviceAtomicSlice {
+            handles: (0..buf.len()).map(|i| DeviceAtomic::at(buf, i)).collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+}
+
+impl<T> std::ops::Index<usize> for DeviceAtomicSlice<T> {
+    type Output = DeviceAtomic<T>;
+
+    fn index(&self, index: usize) -> &DeviceAtomic<T> {
+        &self.handles[index]
     }
 }
 

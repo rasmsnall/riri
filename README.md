@@ -27,8 +27,10 @@ kernel -> simulated threads -> seeded scheduler -> shadow memory -> diagnostics
   no decisions are needed at all, which is itself worth knowing: the bug is not an exotic
   race, it is there whenever threads run in plain order.
 - **Runs cuda-oxide shaped kernels.** A kernel written against `cuda_device` runs under
-  Riri with its source unchanged, because the same free functions
-  (`thread::index_1d`, `DisjointSlice`, `warp::shuffle`) are provided here. The point is
+  Riri with its source unchanged, because the same surface is provided here:
+  `thread::index_1d`, `DisjointSlice`, `warp::shuffle`, `threadfence`, and atomics that
+  index as they do on the GPU, so `counters[i].fetch_add(1, AtomicOrdering::Relaxed)`
+  needs no changing. The point is
   Tier 2: `get_unchecked_mut` asserts an index is the calling thread's alone, nothing on
   hardware verifies that, and under Riri two threads claiming one element is an ordinary
   data race with both lines named. See [`riri::oxide`](docs/api.md).

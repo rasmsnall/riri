@@ -1,6 +1,6 @@
 [package]
 name = "riri"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A Miri-style undefined-behaviour detector for Rust GPU kernels: run SIMT kernels on the CPU and catch data races, barrier and warp divergence, bad shuffle masks, and uninitialised reads of shared or global memory, understands release and acquire ordering between blocks, and shrinks a failing schedule to the few decisions that cause it."

@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::ops::{Add, Deref, DerefMut};
+use std::ops::{Add, Deref, DerefMut, Sub};
 use std::panic::Location;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -237,25 +237,58 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
     /// matching release published.
     #[track_caller]
     pub fn atomic_load(&self, ctx: &ThreadCtx<'_>, index: usize, ordering: Ordering) -> T {
-        checked_access(
-            Buffer {
-                mem: &self.mem,
-                space: || self.space(),
-                reset: Self::reset,
-            },
-            ctx,
-            index,
-            AccessKind::Atomic,
-            Location::caller(),
-            Some(ordering),
-            |v| *v,
-        )
+        self.atomic_load_at(ctx, index, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_load_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| *v)
     }
 
     /// An atomic write. With [`Ordering::Release`], or after a release fence,
     /// it publishes everything this thread did beforehand.
     #[track_caller]
     pub fn atomic_store(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) {
+        self.atomic_store_at(ctx, index, value, ordering, Location::caller());
+    }
+
+    pub(crate) fn atomic_store_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) {
+        self.atomic_rmw(ctx, index, ordering, at, |v| {
+            *v = value;
+            value
+        });
+    }
+}
+
+impl<T: Copy + Send + 'static> GlobalBuf<T> {
+    /// The read-modify-write every atomic below is a shape of.
+    ///
+    /// The update runs while the element is held, so nothing can interleave
+    /// between reading the old value and writing the new one. That is what
+    /// makes it atomic here, and it is why a compare-and-exchange can decide
+    /// and act in one step.
+    /// `at` is passed in rather than captured, because the shim reaches these
+    /// through a closure and `#[track_caller]` does not survive one.
+    pub(crate) fn atomic_rmw(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+        update: impl FnOnce(&mut T) -> T,
+    ) -> T {
         checked_access(
             Buffer {
                 mem: &self.mem,
@@ -265,13 +298,147 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
             ctx,
             index,
             AccessKind::Atomic,
-            Location::caller(),
+            at,
             Some(ordering),
-            |v| {
+            update,
+        )
+    }
+
+    /// `atomicExch`: writes `value` and returns what was there.
+    #[track_caller]
+    pub fn atomic_swap(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+    ) -> T {
+        self.atomic_swap_at(ctx, index, value, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_swap_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| std::mem::replace(v, value))
+    }
+}
+
+impl<T: Copy + Send + PartialEq + 'static> GlobalBuf<T> {
+    /// `atomicCAS`: writes `new` only if the element still holds `current`.
+    ///
+    /// Returns the previous value either way, as `Ok` when the exchange
+    /// happened and `Err` when it did not, matching `std`.
+    #[track_caller]
+    pub fn atomic_compare_exchange(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        current: T,
+        new: T,
+        ordering: Ordering,
+    ) -> Result<T, T> {
+        self.atomic_compare_exchange_at(ctx, index, current, new, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_compare_exchange_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        current: T,
+        new: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> Result<T, T> {
+        let mut exchanged = false;
+        let previous = self.atomic_rmw(ctx, index, ordering, at, |v| {
+            let previous = *v;
+            if previous == current {
+                *v = new;
+                exchanged = true;
+            }
+            previous
+        });
+        if exchanged {
+            Ok(previous)
+        } else {
+            Err(previous)
+        }
+    }
+}
+
+impl<T: Copy + Send + Ord + 'static> GlobalBuf<T> {
+    /// `atomicMin`, returning the previous value.
+    #[track_caller]
+    pub fn atomic_min(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) -> T {
+        self.atomic_min_at(ctx, index, value, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_min_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| {
+            let previous = *v;
+            if value < previous {
                 *v = value;
-                value
-            },
-        );
+            }
+            previous
+        })
+    }
+
+    /// `atomicMax`, returning the previous value.
+    #[track_caller]
+    pub fn atomic_max(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) -> T {
+        self.atomic_max_at(ctx, index, value, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_max_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| {
+            let previous = *v;
+            if value > previous {
+                *v = value;
+            }
+            previous
+        })
+    }
+}
+
+impl<T: Copy + Send + Sub<Output = T> + 'static> GlobalBuf<T> {
+    /// `atomicSub`, returning the previous value.
+    #[track_caller]
+    pub fn atomic_sub(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) -> T {
+        self.atomic_sub_at(ctx, index, value, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_sub_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| {
+            let previous = *v;
+            *v = previous - value;
+            previous
+        })
     }
 }
 
@@ -280,23 +447,22 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
     /// other, only with concurrent plain accesses.
     #[track_caller]
     pub fn atomic_add(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) -> T {
-        checked_access(
-            Buffer {
-                mem: &self.mem,
-                space: || self.space(),
-                reset: Self::reset,
-            },
-            ctx,
-            index,
-            AccessKind::Atomic,
-            Location::caller(),
-            Some(ordering),
-            |v| {
-                let old = *v;
-                *v = old + value;
-                old
-            },
-        )
+        self.atomic_add_at(ctx, index, value, ordering, Location::caller())
+    }
+
+    pub(crate) fn atomic_add_at(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        value: T,
+        ordering: Ordering,
+        at: &'static Location<'static>,
+    ) -> T {
+        self.atomic_rmw(ctx, index, ordering, at, |v| {
+            let previous = *v;
+            *v = previous + value;
+            previous
+        })
     }
 }
 
