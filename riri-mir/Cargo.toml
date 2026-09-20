@@ -1,0 +1,17 @@
+[package]
+name = "riri-mir"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Extracts MIR for Riri, as a rustc driver. Nightly only."
+license = "MIT OR Apache-2.0"
+
+# Its own workspace: this crate cannot build on the toolchain the library
+# uses, so it must not be pulled into that build.
+[workspace]
+
+[[bin]]
+name = "riri-mir"
+path = "src/main.rs"
+
+[dependencies]

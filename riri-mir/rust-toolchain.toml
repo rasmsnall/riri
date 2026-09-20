@@ -1,0 +1,6 @@
+# Pinned deliberately. rustc_public is a stable interface to an unstable
+# compiler: the API holds across nightlies, the ABI of the rustc_private
+# crates it links against does not. This is the nightly cuda-oxide builds on.
+[toolchain]
+channel = "nightly-2026-08-28"
+components = ["rustc-dev", "llvm-tools", "rust-src"]

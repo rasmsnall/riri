@@ -10,6 +10,13 @@ repository = "https://github.com/rasmsnall/riri"
 documentation = "https://docs.rs/riri"
 keywords = ["gpu", "cuda", "simt", "race-detection", "miri"]
 categories = ["development-tools::testing", "concurrency"]
+exclude = ["riri-mir"]
+
+# riri-mir is a rustc driver on a pinned nightly. It is excluded from this
+# workspace and from the published package: it cannot build on stable, and
+# nothing in the library depends on it.
+[workspace]
+exclude = ["riri-mir"]
 
 [dependencies]
 
