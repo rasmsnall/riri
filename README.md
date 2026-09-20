@@ -40,6 +40,12 @@ kernel -> simulated threads -> seeded scheduler -> shadow memory -> diagnostics
   deadlock on hardware. Riri detects that no thread can make progress, works out who was
   waiting on whom, and reports it. A block barrier stalled behind an unreconvergeable warp
   is named as the symptom it is, and the warp is blamed instead.
+- **Follows release and acquire between blocks.** Blocks cannot use a barrier with each
+  other, so they hand data over through global memory with a fence and a flag. Riri tracks
+  that with a vector clock per thread, which means a correct handoff is reported clean and
+  the same kernel without its fences is reported as the race it is. Kernels that never
+  fence pay nothing: an unsynchronised clock orders nothing, which is the old behaviour
+  exactly.
 - **Models memory ordering per scope.** A block barrier orders the block. A full-mask warp
   collective orders that warp alone. A partial mask orders nothing, because it says nothing
   about the lanes it leaves out. Warp-synchronous code that is correct is reported clean,
@@ -63,6 +69,7 @@ until a compiler or architecture change removes it.
 | Warp divergence: a lane named by a shuffle's mask never arrives | Yes |
 | Lanes disagreeing about a collective's member mask | Yes |
 | Shuffles reading a lane outside the mask | Yes |
+| Cross-block handoffs missing a `threadfence` or release/acquire pair | Yes |
 | Reads of uninitialised shared memory | Yes |
 | Out-of-bounds accesses and kernel panics, reported as traps | Yes |
 | cuda-oxide `get_unchecked_mut` claiming one element twice | Yes |
@@ -132,6 +139,27 @@ assert!(report.has_race());
 assert!(report.has_warp_divergence());
 ```
 
+Blocks cannot share a barrier, so they hand data over with a fence and a flag. Riri follows
+that:
+
+```rust
+launch(&LaunchConfig::new(2, 1), |t| {
+    if t.block_linear() == 0 {
+        data.write(t, 0, 42);
+        t.threadfence();
+        flag.atomic_store(t, 0, 1, Ordering::Relaxed);
+    } else {
+        while flag.atomic_load(t, 0, Ordering::Relaxed) == 0 {}
+        t.threadfence();
+        let _ = data.read(t, 0);          // ordered, not a race
+    }
+});
+```
+
+Remove either fence and the read of `data` is reported against the write, because nothing
+then orders the two blocks. `atomic_store(.., Ordering::Release)` paired with
+`atomic_load(.., Ordering::Acquire)` does the same job without the fences.
+
 Searching across schedules, rather than running one, is [`explore`]:
 
 ```rust
@@ -143,8 +171,8 @@ let found = Explore::new(&LaunchConfig::new(1, 4)).seeds(64).run_with(|| {
     move |t: &ThreadCtx<'_>| {
         let i = t.thread_linear();
         if i == 0 {
-            flag.atomic_add(t, 0, 1);
-        } else if flag.atomic_add(t, 0, 0) == 0 {
+            flag.atomic_add(t, 0, 1, Ordering::Relaxed);
+        } else if flag.atomic_add(t, 0, 0, Ordering::Relaxed) == 0 {
             // Racy, but only for threads that ran before thread 0 published.
             out.write(t, 0, i as u32);
         }
@@ -203,6 +231,7 @@ cargo run --example reduction     # block reduction, barrier removed from the lo
 cargo run --example warp_reduce   # warp reduction, shuffle hidden inside a branch
 cargo run --example shrink        # searching schedules, then shrinking the failing one
 cargo run --example oxide_kernel  # a cuda-oxide shaped kernel with a bad unchecked index
+cargo run --example message_passing  # a block-to-block handoff, with and without fences
 ```
 
 ## Development
@@ -216,6 +245,7 @@ cargo run --example reduction
 cargo run --example warp_reduce
 cargo run --example shrink
 cargo run --example oxide_kernel
+cargo run --example message_passing
 ```
 
 These are exactly the gates CI runs. Build, test and the examples run on stable and on
@@ -253,16 +283,17 @@ memory surface, which is enough to prove out the detection model and to test ker
 - Member masks are `u32`, so warp sizes above 32 are not modelled. `LaunchConfig::warp_size`
   accepts any power of two up to 32, which is mainly useful for writing small readable warp
   tests. AMD 64-lane wavefronts are out of scope.
-- No `__threadfence` or memory-order modelling beyond atomics.
+- Release and acquire are modelled; the relaxed-atomic *value* semantics are not. Riri
+  executes atomics in the order its scheduler picks, so a load returns some value that was
+  actually stored, never a stale one that a weakly ordered machine could hand back. It
+  checks synchronisation, not visibility.
 - Each element remembers at most 8 recent readers. Beyond that, some write-after-read races
   can be missed.
 - Launches are capped at 16,384 threads, because each simulated thread is an OS thread.
 
 ## Roadmap
 
-1. **Memory fences and weak memory** for global-memory communication, which Riri does not
-   model at all beyond atomics.
-2. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
+1. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
    threads, applying Tree Borrows across lanes, so arbitrary `unsafe` in a kernel is checked
    without rewriting it. It would also close the helper-location gap for free, since MIR
    gives real program counters. A driver that reaches MIR through `rustc_public` exists in
@@ -270,7 +301,7 @@ memory surface, which is enough to prove out the detection model and to test ker
    needs a pinned nightly with `rustc-dev`, so it is not part of this crate or its CI.
 
 Shipped: the warp model with shuffle convergence checks in v0.2, schedule exploration and
-shrinking in v0.3, the cuda-oxide shim in v0.4.
+shrinking in v0.3, the cuda-oxide shim in v0.4, release and acquire ordering in v0.5.
 
 ## Documentation
 

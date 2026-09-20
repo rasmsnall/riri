@@ -1,4 +1,4 @@
-use riri::{launch, Diagnostic, GlobalBuf, LaunchConfig, MemSpace};
+use riri::{launch, Diagnostic, GlobalBuf, LaunchConfig, MemSpace, Ordering};
 
 fn count<F: Fn(&Diagnostic) -> bool>(r: &riri::Report, f: F) -> usize {
     r.diagnostics.iter().filter(|d| f(d)).count()
@@ -116,7 +116,7 @@ fn barrier_in_divergent_branch() {
 fn atomics_do_not_race() {
     let sum = GlobalBuf::new("sum", vec![0u32; 1]);
     let report = launch(&LaunchConfig::new(4, 32), |t| {
-        sum.atomic_add(t, 0, 1);
+        sum.atomic_add(t, 0, 1, Ordering::Relaxed);
     });
     report.assert_clean();
     assert_eq!(sum.to_vec()[0], 128);
@@ -127,7 +127,7 @@ fn plain_read_racing_atomics() {
     let sum = GlobalBuf::new("sum", vec![0u32; 1]);
     let seen = GlobalBuf::new("seen", vec![0u32; 32]);
     let report = launch(&LaunchConfig::new(1, 32), |t| {
-        sum.atomic_add(t, 0, 1);
+        sum.atomic_add(t, 0, 1, Ordering::Relaxed);
         seen.write(t, t.thread_linear(), sum.read(t, 0));
     });
     assert!(report.has_race(), "{report}");

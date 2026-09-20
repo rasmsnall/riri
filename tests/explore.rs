@@ -1,7 +1,9 @@
 //! Searching across schedules, and shrinking a failing one down to something
 //! a person can read.
 
-use riri::{explore, replay, Explore, GlobalBuf, LaunchConfig, Schedule, Shrink, ThreadCtx};
+use riri::{
+    explore, replay, Explore, GlobalBuf, LaunchConfig, Ordering, Schedule, Shrink, ThreadCtx,
+};
 
 /// Every thread writes the same cell, so any schedule races.
 fn racy(t: &ThreadCtx<'_>, out: &GlobalBuf<u32>) {
@@ -107,7 +109,7 @@ fn a_kernel_that_carries_state_is_reported_as_unreproducible() {
     let out = GlobalBuf::new("out", vec![0u32; 1]);
 
     let found = Explore::new(&LaunchConfig::new(1, 4)).seeds(4).run(|t| {
-        let seen = runs.atomic_add(t, 0, 1);
+        let seen = runs.atomic_add(t, 0, 1, Ordering::Relaxed);
         if seen < 4 {
             out.write(t, 0, 1);
         }
@@ -127,7 +129,7 @@ fn run_with_gives_each_run_its_own_state() {
             let runs = GlobalBuf::new("runs", vec![0u32; 1]);
             let out = GlobalBuf::new("out", vec![0u32; 1]);
             move |t: &ThreadCtx<'_>| {
-                let seen = runs.atomic_add(t, 0, 1);
+                let seen = runs.atomic_add(t, 0, 1, Ordering::Relaxed);
                 if seen < 4 {
                     out.write(t, 0, 1);
                 }

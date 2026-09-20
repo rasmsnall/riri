@@ -4,8 +4,9 @@ use std::panic::Location;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::ctx::ThreadCtx;
-use crate::diag::{Access, AccessKind, Diagnostic, MemSpace};
+use crate::diag::{AccessKind, Diagnostic, MemSpace};
 use crate::shadow::Cell;
+use crate::sync::Ordering;
 
 /// Shared implementation for any instrumented array.
 struct Instrumented<T> {
@@ -32,6 +33,7 @@ fn checked_access<T, S, R>(
     index: usize,
     kind: AccessKind,
     location: &'static Location<'static>,
+    ordering: Option<Ordering>,
     op: impl FnOnce(&mut T) -> T,
 ) -> T
 where
@@ -44,7 +46,6 @@ where
     // Let another thread run first: this is where interleavings come from.
     ctx.schedule_point();
 
-    let acc: Access = ctx.access(kind, location);
     let mut m = mem.lock().unwrap();
     if m.launch_id != ctx.launch_id() {
         reset(&mut m);
@@ -53,21 +54,33 @@ where
     let len = m.data.len();
     if index >= len {
         drop(m);
+        let (access, _) = ctx.access(kind, location);
         ctx.trap(Diagnostic::OutOfBounds {
             space: space(),
             index,
             len,
-            access: acc,
+            access,
         });
     }
 
+    // An acquire has to land before this access is weighed against earlier
+    // ones, or it would not order the very access that performed it.
+    if let Some(ordering) = ordering {
+        let published = m.shadow[index].release.clone();
+        ctx.acquire_from(&published, ordering);
+    }
+
+    let (acc, now) = ctx.access(kind, location);
     let cell = &mut m.shadow[index];
     let was_init = cell.init;
     let conflict = match kind {
-        AccessKind::Read => cell.on_read(acc),
-        AccessKind::Write | AccessKind::Atomic => cell.on_write(acc),
+        AccessKind::Read => cell.on_read(acc, &now),
+        AccessKind::Write | AccessKind::Atomic => cell.on_write(acc, &now),
     };
     let value = op(&mut m.data[index]);
+    if let Some(ordering) = ordering {
+        ctx.release_into(&mut m.shadow[index].release, ordering);
+    }
     drop(m);
 
     if kind != AccessKind::Write && !was_init {
@@ -163,6 +176,7 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
             index,
             AccessKind::Read,
             Location::caller(),
+            None,
             |v| *v,
         )
     }
@@ -179,6 +193,50 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
             index,
             AccessKind::Write,
             Location::caller(),
+            None,
+            |v| {
+                *v = value;
+                value
+            },
+        );
+    }
+}
+
+impl<T: Copy + Send + 'static> GlobalBuf<T> {
+    /// An atomic read. With [`Ordering::Acquire`] it takes on whatever a
+    /// matching release published.
+    #[track_caller]
+    pub fn atomic_load(&self, ctx: &ThreadCtx<'_>, index: usize, ordering: Ordering) -> T {
+        checked_access(
+            Buffer {
+                mem: &self.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
+            ctx,
+            index,
+            AccessKind::Atomic,
+            Location::caller(),
+            Some(ordering),
+            |v| *v,
+        )
+    }
+
+    /// An atomic write. With [`Ordering::Release`], or after a release fence,
+    /// it publishes everything this thread did beforehand.
+    #[track_caller]
+    pub fn atomic_store(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) {
+        checked_access(
+            Buffer {
+                mem: &self.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
+            ctx,
+            index,
+            AccessKind::Atomic,
+            Location::caller(),
+            Some(ordering),
             |v| {
                 *v = value;
                 value
@@ -191,7 +249,7 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
     /// `atomicAdd`: returns the previous value. Atomics never race with each
     /// other, only with concurrent plain accesses.
     #[track_caller]
-    pub fn atomic_add(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) -> T {
+    pub fn atomic_add(&self, ctx: &ThreadCtx<'_>, index: usize, value: T, ordering: Ordering) -> T {
         checked_access(
             Buffer {
                 mem: &self.mem,
@@ -202,6 +260,7 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
             index,
             AccessKind::Atomic,
             Location::caller(),
+            Some(ordering),
             |v| {
                 let old = *v;
                 *v = old + value;
@@ -258,7 +317,7 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
     ) -> Option<ElemMut<'_, T>> {
         ctx.schedule_point();
 
-        let acc = ctx.access(AccessKind::Write, location);
+        let (acc, now) = ctx.access(AccessKind::Write, location);
         let mut m = self.mem.lock().unwrap();
         if m.launch_id != ctx.launch_id() {
             Self::reset(&mut m);
@@ -280,7 +339,7 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
 
         // Reporting takes a different lock, so this is safe to do while the
         // element stays borrowed.
-        if let Some(first) = m.shadow[index].on_write(acc) {
+        if let Some(first) = m.shadow[index].on_write(acc, &now) {
             ctx.report(Diagnostic::DataRace {
                 space: self.space(),
                 index,
@@ -366,6 +425,7 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
             index,
             AccessKind::Read,
             Location::caller(),
+            None,
             |v| *v,
         )
     }
@@ -382,6 +442,7 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
             index,
             AccessKind::Write,
             Location::caller(),
+            None,
             |v| {
                 *v = value;
                 value

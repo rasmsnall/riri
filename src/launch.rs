@@ -8,6 +8,7 @@ use crate::ctx::ThreadCtx;
 use crate::diag::{Diagnostic, Report, Reporter};
 use crate::dim::Dim3;
 use crate::sched::{AbortSignal, Choices, Scheduler, SplitMix64};
+use crate::sync::SyncState;
 use crate::warp::WARP_SIZE;
 
 /// Simulated threads are real OS threads, so keep launches test-sized.
@@ -75,6 +76,9 @@ pub(crate) struct LaunchState {
     pub(crate) blocks: Vec<BlockState>,
     pub(crate) warps: Vec<WarpState>,
     pub(crate) warps_per_block: usize,
+    /// Per-thread vector clocks. Only one thread runs at a time, so this is
+    /// never contended.
+    pub(crate) sync: Mutex<SyncState>,
 }
 
 /// Runs `kernel` once per simulated GPU thread and returns what Riri found.
@@ -154,6 +158,7 @@ where
             })
             .collect(),
         warps_per_block,
+        sync: Mutex::new(SyncState::new(total as usize, blocks as usize)),
     });
 
     std::thread::scope(|scope| {

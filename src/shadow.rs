@@ -16,16 +16,28 @@
 //! and either in different warps or in the same warp epoch.
 
 use crate::diag::{Access, AccessKind};
+use crate::sync::{key, Clock};
 
 /// Bound on remembered readers per element. Beyond this, some races between a
 /// write and an old reader may be missed; this keeps memory bounded.
 const MAX_READERS: usize = 8;
 
-pub(crate) fn concurrent(a: &Access, b: &Access) -> bool {
+/// Whether two accesses are unordered, where `b` is the one happening now
+/// and `now` is the clock of the thread making it.
+///
+/// `b` cannot happen-before `a`, since `a` was recorded first, so only one
+/// direction needs testing.
+pub(crate) fn concurrent(a: &Access, b: &Access, now: &Clock) -> bool {
     if a.block == b.block && a.thread == b.thread {
         return false;
     }
     if a.kind == AccessKind::Atomic && b.kind == AccessKind::Atomic {
+        return false;
+    }
+    // Release and acquire ordering, at any scope. A thread that has never
+    // synchronised has an empty clock, which orders nothing, so kernels that
+    // do not fence behave exactly as they did before.
+    if now.get(key(a.block, a.thread)) >= a.seq {
         return false;
     }
     if a.block != b.block {
@@ -45,6 +57,9 @@ pub(crate) struct Cell {
     pub(crate) init: bool,
     last_write: Option<Access>,
     readers: Vec<Access>,
+    /// What a release to this element has published, for an acquire to pick
+    /// up. Only atomic accesses touch it.
+    pub(crate) release: Clock,
 }
 
 impl Cell {
@@ -56,8 +71,8 @@ impl Cell {
     }
 
     /// Records a read; returns a concurrent earlier write, if any.
-    pub(crate) fn on_read(&mut self, acc: Access) -> Option<Access> {
-        let conflict = self.last_write.filter(|w| concurrent(w, &acc));
+    pub(crate) fn on_read(&mut self, acc: Access, now: &Clock) -> Option<Access> {
+        let conflict = self.last_write.filter(|w| concurrent(w, &acc, now));
         // Readers from this block in older epochs happen-before everything
         // now, so they can be forgotten. Cross-block readers must be kept.
         self.readers
@@ -73,16 +88,34 @@ impl Cell {
     }
 
     /// Records a write or atomic; returns a concurrent earlier access, if any.
-    pub(crate) fn on_write(&mut self, acc: Access) -> Option<Access> {
+    pub(crate) fn on_write(&mut self, acc: Access, now: &Clock) -> Option<Access> {
         let conflict = self
             .last_write
-            .filter(|w| concurrent(w, &acc))
-            .or_else(|| self.readers.iter().copied().find(|r| concurrent(r, &acc)));
+            .filter(|w| concurrent(w, &acc, now))
+            .or_else(|| {
+                self.readers
+                    .iter()
+                    .copied()
+                    .find(|r| concurrent(r, &acc, now))
+            });
         self.last_write = Some(acc);
         // Concurrent readers were just reported; ordered ones are dead.
         self.readers.clear();
         self.init = true;
         conflict
+    }
+}
+
+#[cfg(test)]
+impl Cell {
+    /// `on_read` for a thread that has synchronised with nobody.
+    fn on_read_t(&mut self, acc: Access) -> Option<Access> {
+        self.on_read(acc, &Clock::default())
+    }
+
+    /// `on_write` for a thread that has synchronised with nobody.
+    fn on_write_t(&mut self, acc: Access) -> Option<Access> {
+        self.on_write(acc, &Clock::default())
     }
 }
 
@@ -110,6 +143,7 @@ mod tests {
             epoch,
             warp,
             warp_epoch,
+            seq: 1,
             kind,
             location: Location::caller(),
         }
@@ -118,55 +152,55 @@ mod tests {
     #[test]
     fn same_epoch_different_threads_race() {
         let mut c = Cell::initialised();
-        assert!(c.on_write(acc(0, 0, 0, AccessKind::Write)).is_none());
-        assert!(c.on_read(acc(0, 1, 0, AccessKind::Read)).is_some());
+        assert!(c.on_write_t(acc(0, 0, 0, AccessKind::Write)).is_none());
+        assert!(c.on_read_t(acc(0, 1, 0, AccessKind::Read)).is_some());
     }
 
     #[test]
     fn barrier_orders_accesses() {
         let mut c = Cell::initialised();
-        c.on_write(acc(0, 0, 0, AccessKind::Write));
-        assert!(c.on_read(acc(0, 1, 1, AccessKind::Read)).is_none());
+        c.on_write_t(acc(0, 0, 0, AccessKind::Write));
+        assert!(c.on_read_t(acc(0, 1, 1, AccessKind::Read)).is_none());
     }
 
     #[test]
     fn blocks_are_never_ordered() {
         let mut c = Cell::initialised();
-        c.on_write(acc(0, 0, 0, AccessKind::Write));
-        assert!(c.on_write(acc(1, 0, 5, AccessKind::Write)).is_some());
+        c.on_write_t(acc(0, 0, 0, AccessKind::Write));
+        assert!(c.on_write_t(acc(1, 0, 5, AccessKind::Write)).is_some());
     }
 
     #[test]
     fn atomics_do_not_race_each_other() {
         let mut c = Cell::initialised();
-        c.on_write(acc(0, 0, 0, AccessKind::Atomic));
-        assert!(c.on_write(acc(1, 3, 0, AccessKind::Atomic)).is_none());
-        assert!(c.on_read(acc(0, 7, 0, AccessKind::Read)).is_some());
+        c.on_write_t(acc(0, 0, 0, AccessKind::Atomic));
+        assert!(c.on_write_t(acc(1, 3, 0, AccessKind::Atomic)).is_none());
+        assert!(c.on_read_t(acc(0, 7, 0, AccessKind::Read)).is_some());
     }
 
     #[test]
     fn write_after_concurrent_read_races() {
         let mut c = Cell::initialised();
-        c.on_read(acc(0, 0, 0, AccessKind::Read));
-        assert!(c.on_write(acc(0, 1, 0, AccessKind::Write)).is_some());
+        c.on_read_t(acc(0, 0, 0, AccessKind::Read));
+        assert!(c.on_write_t(acc(0, 1, 0, AccessKind::Write)).is_some());
     }
 
     #[test]
     fn warp_collective_orders_accesses_in_that_warp() {
         let mut c = Cell::initialised();
-        c.on_write(warp_acc(0, 0, 0, 0, 0, AccessKind::Write));
+        c.on_write_t(warp_acc(0, 0, 0, 0, 0, AccessKind::Write));
         assert!(c
-            .on_read(warp_acc(0, 1, 0, 0, 1, AccessKind::Read))
+            .on_read_t(warp_acc(0, 1, 0, 0, 1, AccessKind::Read))
             .is_none());
     }
 
     #[test]
     fn warp_collective_does_not_order_other_warps() {
         let mut c = Cell::initialised();
-        c.on_write(warp_acc(0, 0, 0, 0, 1, AccessKind::Write));
+        c.on_write_t(warp_acc(0, 0, 0, 0, 1, AccessKind::Write));
         // Warp 1 never took part, so its accesses are still concurrent.
         assert!(c
-            .on_read(warp_acc(0, 32, 0, 1, 0, AccessKind::Read))
+            .on_read_t(warp_acc(0, 32, 0, 1, 0, AccessKind::Read))
             .is_some());
     }
 }

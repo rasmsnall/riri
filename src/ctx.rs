@@ -7,6 +7,7 @@ use crate::dim::Dim3;
 use crate::launch::LaunchState;
 use crate::mem::SharedArray;
 use crate::sched::AbortSignal;
+use crate::sync::{key, Clock, Ordering};
 
 /// Per-thread view of a running kernel: the equivalent of CUDA's built-in
 /// `threadIdx`, `blockIdx`, `blockDim`, `gridDim`, plus `__syncthreads()`
@@ -87,6 +88,16 @@ impl<'l> ThreadCtx<'l> {
     /// callers reached through a closure, where `#[track_caller]` does not
     /// survive.
     pub(crate) fn sync_threads_at(&self, loc: &'static Location<'static>) {
+        let block = self.block as usize;
+        // Publish into the block before parking, take the block's out after
+        // release. Every thread has arrived by then, so what comes back is
+        // everything the block knows.
+        self.launch
+            .sync
+            .lock()
+            .unwrap()
+            .barrier_arrive(self.gid, block);
+
         if self
             .launch
             .sched
@@ -95,6 +106,29 @@ impl<'l> ThreadCtx<'l> {
         {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }
+
+        self.launch
+            .sync
+            .lock()
+            .unwrap()
+            .barrier_depart(self.gid, block);
+    }
+
+    /// `__threadfence()`: orders this thread's accesses against the atomics
+    /// around it, without ordering the thread against anything on its own.
+    ///
+    /// Paired with relaxed atomics this is how blocks communicate. The
+    /// producer writes its data, fences, then sets a flag; the consumer reads
+    /// the flag, fences, then reads the data. Without the fences the two sides
+    /// are unordered and Riri reports the data accesses as a race, which is
+    /// what they are.
+    pub fn threadfence(&self) {
+        self.fence(Ordering::AcqRel);
+    }
+
+    /// A one-sided fence, for code that knows which side it needs.
+    pub fn fence(&self, ordering: Ordering) {
+        self.launch.sync.lock().unwrap().fence(self.gid, ordering);
     }
 
     /// A block-wide `__shared__` array. The first thread of the block to ask
@@ -143,18 +177,53 @@ impl<'l> ThreadCtx<'l> {
         }
     }
 
-    pub(crate) fn access(&self, kind: AccessKind, location: &'static Location<'static>) -> Access {
+    /// Records one operation of this thread, returning both the access and
+    /// the thread's clock as it now stands.
+    ///
+    /// The clock comes back with the access because deciding whether an
+    /// earlier access is ordered against this one needs the state of the
+    /// thread making it, not of the thread that made the earlier one.
+    pub(crate) fn access(
+        &self,
+        kind: AccessKind,
+        location: &'static Location<'static>,
+    ) -> (Access, Clock) {
         let warp = self.warp_id();
         let (epoch, warp_epoch) = self.launch.sched.epochs(self.block as usize, warp as usize);
-        Access {
+
+        let mut sync = self.launch.sync.lock().unwrap();
+        let seq = sync.tick(self.gid, key(self.block, self.thread));
+        let now = sync.clock(self.gid).clone();
+
+        let access = Access {
             block: self.block,
             thread: self.thread,
             epoch,
             warp,
             warp_epoch,
+            seq,
             kind,
             location,
-        }
+        };
+        (access, now)
+    }
+
+    /// Publishes this thread's earlier work into `target`.
+    pub(crate) fn release_into(&self, target: &mut Clock, ordering: Ordering) {
+        self.launch
+            .sync
+            .lock()
+            .unwrap()
+            .release(self.gid, target, ordering);
+    }
+
+    /// Takes on whatever `source` published.
+    pub(crate) fn acquire_from(&self, source: &Clock, ordering: Ordering) {
+        self.launch
+            .sync
+            .lock()
+            .unwrap()
+            .acquire(self.gid, source, ordering);
     }
 
     /// The exchange slots this thread's warp uses to publish values to its

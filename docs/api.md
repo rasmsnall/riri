@@ -1,10 +1,10 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.4.0.
+**Status** Complete. Describes the surface as built, at version 0.5.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.4
+**Version** 1.5
 **Date** 2026-09-20
 
 ---
@@ -28,8 +28,9 @@
 - IV. Memory
   - 1. `GlobalBuf`
   - 2. `SharedArray`
-  - 3. Atomics
-  - 4. Lifetime of values and of shadow state
+  - 3. Atomics and ordering
+  - 4. Fences
+  - 5. Lifetime of values and of shadow state
 - V. Warp Collectives
   - 1. Member masks
   - 2. Shuffles
@@ -253,17 +254,53 @@ aborts the launch.
 Obtained from `ThreadCtx::shared`, with the same `read`, `write`, `len`, and `is_empty`.
 There is no `to_vec`, because shared memory does not outlive the launch.
 
-### 3. Atomics
+### 3. Atomics and ordering
 
 ```rust
-a.atomic_add(t, i, value) -> T      // returns the previous value
+a.atomic_load(t, i, ordering) -> T
+a.atomic_store(t, i, value, ordering)
+a.atomic_add(t, i, value, ordering) -> T      // returns the previous value
 ```
 
-Available where `T: Add<Output = T>`. Atomics never conflict with each other at any scope,
-including across blocks, but they do conflict with concurrent plain reads and writes, which
-is the bug this models.
+`atomic_add` is available where `T: Add<Output = T>`. Atomics never conflict with each other
+at any scope, including across blocks, but they do conflict with concurrent plain reads and
+writes, which is the bug this models.
 
-### 4. Lifetime of values and of shadow state
+`Ordering` is `Relaxed`, `Acquire`, `Release`, `AcqRel`, or `SeqCst`. `SeqCst` is accepted
+and treated as `AcqRel`: Riri models synchronisation between threads, not a single total
+order over all atomics, and nothing it checks can tell the two apart.
+
+A release store paired with an acquire load orders everything the releasing thread did
+beforehand against everything the acquiring thread does afterwards. That is what lets one
+block hand data to another.
+
+### 4. Fences
+
+```rust
+t.threadfence();              // __threadfence(), both halves
+t.fence(Ordering::Release);   // one side only
+```
+
+The other spelling of the same handoff, and the one CUDA code usually uses. A release fence
+makes the next relaxed store publish; an acquire fence makes the previous relaxed load
+count.
+
+```rust
+// producer                           // consumer
+data.write(t, 0, 42);                 while flag.atomic_load(t, 0, Relaxed) == 0 {}
+t.threadfence();                      t.threadfence();
+flag.atomic_store(t, 0, 1, Relaxed);  let v = data.read(t, 0);   // ordered
+```
+
+Remove either fence and the two `data` accesses are reported against each other, because
+nothing then orders the blocks.
+
+A barrier feeds this too: a thread that raises a flag after `sync_threads` publishes the
+whole block's writes, not just its own. Warp collectives do not, so a lane releasing
+straight after `sync_warp` publishes only its own work. See `architecture.md`, Chapter III,
+Section 5.
+
+### 5. Lifetime of values and of shadow state
 
 Global buffers keep their values across launches, so a buffer can be written by one launch
 and read by the next. Access history does not carry over: each launch starts with a clean
@@ -706,6 +743,7 @@ fn the_flag_race_stays_fixed() {
 | `Report` | Struct | root |
 | `explore`, `replay` | Functions | root |
 | `ElemMut` | Struct | root |
+| `Ordering` | Enum | root |
 | `launch`, `thread`, `warp`, `DisjointSlice`, `ThreadIndex` | cuda-oxide shim | `oxide` |
 | `Explore`, `Exploration`, `Failure`, `Schedule`, `Shrink` | Exploration types | root |
 | `Diagnostic` | Enum | root |

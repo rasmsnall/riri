@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.4
+**Version** 1.5
 **Date** 2026-09-20
 
 ---
@@ -25,6 +25,7 @@
   - 2. The concurrency rule
   - 3. Why a partial mask orders nothing
   - 4. Atomics
+  - 5. Release and acquire between blocks
 - IV. Shadow Memory
   - 1. Per-element state
   - 2. Reads and writes
@@ -65,6 +66,7 @@
 
 - `<Table 2-1>` Module map
 - `<Table 3-1>` Ordering by scope
+- `<Table 3-2>` What a release publishes
 - `<Table 5-1>` Warp collectives
 - `<Table 7-1>` Diagnostics
 - `<Table 8-1>` Outcomes of shrinking
@@ -141,7 +143,9 @@ Not in scope:
 - Performance modelling of any kind. Riri says nothing about occupancy, coalescing, or
   throughput.
 - Warp sizes above 32. Member masks are `u32`.
-- Weak memory and fences beyond atomics.
+- Weak memory as *values*. Release and acquire are modelled, but an atomic load always
+  returns a value that was genuinely stored, never a stale one a weakly ordered machine
+  could hand back. Riri checks synchronisation, not visibility.
 
 ---
 
@@ -163,6 +167,7 @@ threads: the cap is a resource limit, not a modelling one.
 | `mem.rs` | `GlobalBuf`, `SharedArray`, the instrumented access path |
 | `shadow.rs` | Per-element access history and the concurrency rule |
 | `warp.rs` | Warp collectives and mask validation |
+| `sync.rs` | Vector clocks, fences, release and acquire |
 | `explore.rs` | Searching across seeds, and shrinking a failing schedule |
 | `diag.rs` | `Diagnostic`, `Report`, the de-duplicating reporter |
 | `oxide.rs` | The cuda-oxide shaped surface |
@@ -262,6 +267,43 @@ Atomics never conflict with each other, at any scope, including across blocks. T
 conflict with concurrent plain reads and writes, which is the bug worth catching: a kernel
 that accumulates with `atomic_add` while another thread reads the same cell without
 synchronisation.
+
+### 5. Release and acquire between blocks
+
+Blocks cannot share a barrier, so the only way they communicate is through global memory
+with an atomic flag and a fence. Until that was modelled, every pair of accesses from
+different blocks counted as concurrent, which made a correct handoff unreportable as
+correct. It was a false positive on exactly the code most worth checking.
+
+What carries the ordering is a *vector clock* per thread: for each other thread, the
+highest operation of it this thread is known to have seen. Every instrumented access bumps
+the acting thread's own counter and records it.
+
+`<Table 3-2>` What a release publishes
+
+| Operation | Effect |
+|---|---|
+| Release store or RMW | The acting thread's clock joins into the element's clock |
+| Relaxed store after a release fence | The fence's snapshot joins into the element's clock |
+| Acquire load or RMW | The element's clock joins into the acting thread's |
+| Relaxed load | The element's clock is held aside for a later acquire fence |
+| `threadfence()` | Both halves: pending loads are taken on, and a snapshot is left for later stores |
+
+An earlier access by one thread is then ordered against a later access by another exactly
+when the second thread's clock has caught up with the first access's counter. A thread that
+has never synchronised has an empty clock, which orders nothing, so a kernel that does not
+fence behaves precisely as it did before this existed.
+
+Barriers feed the same machinery. On the way in, a thread contributes its clock to its
+block; on the way out it takes back what the block collectively knows. Without that, a
+thread raising a flag after a barrier would publish only its own writes, and the
+block-mates' writes the barrier had just ordered would look unpublished. That composition,
+a barrier and then a release, is how a multi-thread block hands anything over, and getting
+it wrong reported a race in correct code.
+
+Warp collectives do not feed the clocks. They order a warp through its warp epoch, which is
+within a block and so not what the clocks are for. A lane that releases immediately after a
+`sync_warp` publishes only its own work.
 
 ---
 

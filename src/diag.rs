@@ -26,6 +26,12 @@ pub struct Access {
     pub warp: u32,
     /// Collective generation of the warp when the access happened.
     pub warp_epoch: u64,
+    /// Which operation of this thread it was, counting from one.
+    ///
+    /// Release and acquire ordering is expressed by comparing this against
+    /// another thread's clock, so it is what makes cross-block
+    /// happens-before decidable. See [`crate::Ordering`].
+    pub seq: u64,
     pub kind: AccessKind,
     /// Source location of the access in the kernel.
     pub location: &'static Location<'static>,

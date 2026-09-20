@@ -14,7 +14,7 @@
 //!
 //! cargo run --example shrink
 
-use riri::{replay, Explore, GlobalBuf, LaunchConfig, ThreadCtx};
+use riri::{replay, Explore, GlobalBuf, LaunchConfig, Ordering, ThreadCtx};
 
 fn main() {
     structural();
@@ -69,8 +69,8 @@ fn order_dependent() {
         move |t: &ThreadCtx<'_>| {
             let i = t.thread_linear();
             if i == 0 {
-                flag.atomic_add(t, 0, 1);
-            } else if flag.atomic_add(t, 0, 0) == 0 {
+                flag.atomic_add(t, 0, 1, Ordering::Relaxed);
+            } else if flag.atomic_add(t, 0, 0, Ordering::Relaxed) == 0 {
                 // Racy, but only for the threads that ran before thread 0.
                 out.write(t, 0, i as u32);
             }

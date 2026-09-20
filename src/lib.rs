@@ -45,6 +45,7 @@ mod mem;
 pub mod oxide;
 mod sched;
 mod shadow;
+mod sync;
 pub mod warp;
 
 pub use ctx::ThreadCtx;
@@ -53,3 +54,4 @@ pub use dim::Dim3;
 pub use explore::{explore, replay, Exploration, Explore, Failure, Schedule, Shrink};
 pub use launch::{launch, LaunchConfig, MAX_THREADS};
 pub use mem::{ElemMut, GlobalBuf, SharedArray};
+pub use sync::Ordering;

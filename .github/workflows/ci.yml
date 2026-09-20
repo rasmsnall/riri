@@ -39,3 +39,4 @@ jobs:
       - run: cargo run --example warp_reduce
       - run: cargo run --example shrink
       - run: cargo run --example oxide_kernel
+      - run: cargo run --example message_passing
