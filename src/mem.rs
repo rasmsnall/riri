@@ -15,16 +15,32 @@ struct Instrumented<T> {
     launch_id: u64,
 }
 
-fn checked_access<T: Copy>(
-    mem: &Mutex<Instrumented<T>>,
+/// What the access path needs to know about a buffer: where its data lives,
+/// how to name it in a diagnostic, and how to clear its shadow state when a
+/// new launch first touches it.
+///
+/// These three travel together at every call site, so they are one argument.
+struct Buffer<'a, T, S, R> {
+    mem: &'a Mutex<Instrumented<T>>,
+    space: S,
+    reset: R,
+}
+
+fn checked_access<T, S, R>(
+    buf: Buffer<'_, T, S, R>,
     ctx: &ThreadCtx<'_>,
-    space: impl Fn() -> MemSpace,
     index: usize,
     kind: AccessKind,
     location: &'static Location<'static>,
-    reset: impl Fn(&mut Instrumented<T>),
     op: impl FnOnce(&mut T) -> T,
-) -> T {
+) -> T
+where
+    T: Copy,
+    S: Fn() -> MemSpace,
+    R: Fn(&mut Instrumented<T>),
+{
+    let Buffer { mem, space, reset } = buf;
+
     // Let another thread run first: this is where interleavings come from.
     ctx.schedule_point();
 
@@ -138,13 +154,15 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
     #[track_caller]
     pub fn read(&self, ctx: &ThreadCtx<'_>, index: usize) -> T {
         checked_access(
-            &self.mem,
+            Buffer {
+                mem: &self.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
             ctx,
-            || self.space(),
             index,
             AccessKind::Read,
             Location::caller(),
-            Self::reset,
             |v| *v,
         )
     }
@@ -152,13 +170,15 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
     #[track_caller]
     pub fn write(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) {
         checked_access(
-            &self.mem,
+            Buffer {
+                mem: &self.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
             ctx,
-            || self.space(),
             index,
             AccessKind::Write,
             Location::caller(),
-            Self::reset,
             |v| {
                 *v = value;
                 value
@@ -173,13 +193,15 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
     #[track_caller]
     pub fn atomic_add(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) -> T {
         checked_access(
-            &self.mem,
+            Buffer {
+                mem: &self.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
             ctx,
-            || self.space(),
             index,
             AccessKind::Atomic,
             Location::caller(),
-            Self::reset,
             |v| {
                 let old = *v;
                 *v = old + value;
@@ -335,13 +357,15 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
     #[track_caller]
     pub fn read(&self, ctx: &ThreadCtx<'_>, index: usize) -> T {
         checked_access(
-            &self.inner.mem,
+            Buffer {
+                mem: &self.inner.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
             ctx,
-            || self.space(),
             index,
             AccessKind::Read,
             Location::caller(),
-            Self::reset,
             |v| *v,
         )
     }
@@ -349,13 +373,15 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
     #[track_caller]
     pub fn write(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) {
         checked_access(
-            &self.inner.mem,
+            Buffer {
+                mem: &self.inner.mem,
+                space: || self.space(),
+                reset: Self::reset,
+            },
             ctx,
-            || self.space(),
             index,
             AccessKind::Write,
             Location::caller(),
-            Self::reset,
             |v| {
                 *v = value;
                 value

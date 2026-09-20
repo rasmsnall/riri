@@ -13,12 +13,26 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # 1.75 is the declared minimum supported version, checked on every
+        # push so the claim in Cargo.toml stays true.
         toolchain: [stable, "1.75"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.toolchain == 'stable' && 'rustfmt, clippy' || '' }}
+
+      # Style and lints run on stable only. Both tools change their output
+      # between releases, so running them on the MSRV leg as well would fail
+      # for reasons that have nothing to do with the minimum version.
+      - name: Formatting
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all --check
+      - name: Lints
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --all-targets -- -D warnings
+
       - run: cargo build --all-targets
       - run: cargo test
       - run: cargo run --example reduction

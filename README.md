@@ -208,6 +208,8 @@ cargo run --example oxide_kernel  # a cuda-oxide shaped kernel with a bad unchec
 ## Development
 
 ```
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo build --all-targets
 cargo test
 cargo run --example reduction
@@ -216,8 +218,13 @@ cargo run --example shrink
 cargo run --example oxide_kernel
 ```
 
-These are exactly the gates CI runs, on stable and on 1.75, the declared minimum supported
-version. There are no dependencies and no feature flags.
+These are exactly the gates CI runs. Build, test and the examples run on stable and on
+1.75, the declared minimum supported version; formatting and lints run on stable only,
+since both tools change their output between releases. There are no dependencies and no
+feature flags.
+
+`riri-mir` is not part of any of this. It needs a pinned nightly with `rustc-dev`, and it
+has its own [README](riri-mir/README.md).
 
 ## Scope and limits
 

@@ -1,0 +1,6 @@
+# Commits that only reformat. Ignore them when reading blame:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub picks this file up automatically.
+
+# cargo fmt across the tree
+76a807942850cee2b0b96ec78de328b16efa4f9a
