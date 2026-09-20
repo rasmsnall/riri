@@ -42,7 +42,26 @@ struct WarpWait {
     op: &'static str,
 }
 
-struct SplitMix64(u64);
+/// Upper bound on recorded scheduling decisions. A launch that runs past it
+/// keeps executing but stops recording, and its schedule cannot be replayed.
+pub(crate) const MAX_TRACE: usize = 1 << 20;
+
+/// Where the scheduler's decisions come from.
+///
+/// Recording the *thread* chosen rather than its position among the runnable
+/// threads is what makes a trace survive being edited: a plan that names a
+/// thread which is no longer runnable falls back cleanly instead of silently
+/// meaning something else.
+pub(crate) enum Choices {
+    /// Pick uniformly at random from the runnable threads.
+    Random(SplitMix64),
+    /// Follow a recorded plan. Once it runs out, keep the current thread
+    /// running while it can, which is the schedule with the fewest switches
+    /// and so the one that reads most like ordinary sequential code.
+    Replay { plan: Vec<u32>, cursor: usize },
+}
+
+pub(crate) struct SplitMix64(pub(crate) u64);
 
 impl SplitMix64 {
     fn next(&mut self) -> u64 {
@@ -61,7 +80,9 @@ struct State {
     barrier_loc: Vec<Option<&'static Location<'static>>>,
     warp_wait: Vec<Option<WarpWait>>,
     warp_gen: Vec<u64>,
-    rng: SplitMix64,
+    choices: Choices,
+    trace: Vec<u32>,
+    trace_complete: bool,
     aborted: bool,
 }
 
@@ -75,7 +96,12 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new(blocks: usize, threads_per_block: usize, warp_size: usize, seed: u64) -> Self {
+    pub(crate) fn new(
+        blocks: usize,
+        threads_per_block: usize,
+        warp_size: usize,
+        choices: Choices,
+    ) -> Self {
         let total = blocks * threads_per_block;
         let warps_per_block = threads_per_block.div_ceil(warp_size);
         let mut state = State {
@@ -85,7 +111,9 @@ impl Scheduler {
             barrier_loc: vec![None; blocks],
             warp_wait: vec![None; total],
             warp_gen: vec![0; blocks * warps_per_block],
-            rng: SplitMix64(seed),
+            choices,
+            trace: Vec::new(),
+            trace_complete: true,
             aborted: false,
         };
         Self::pick_next(&mut state);
@@ -103,11 +131,41 @@ impl Scheduler {
         let runnable: Vec<usize> = (0..s.status.len())
             .filter(|&i| s.status[i] == Status::Runnable)
             .collect();
-        s.current = if runnable.is_empty() {
-            None
-        } else {
-            Some(runnable[(s.rng.next() % runnable.len() as u64) as usize])
+        if runnable.is_empty() {
+            s.current = None;
+            return;
+        }
+
+        let previous = s.current;
+        let chosen = match &mut s.choices {
+            Choices::Random(rng) => runnable[(rng.next() % runnable.len() as u64) as usize],
+            Choices::Replay { plan, cursor } => {
+                let planned = plan.get(*cursor).copied();
+                *cursor += 1;
+                match planned {
+                    // A plan naming a thread that cannot run now is stale,
+                    // which happens while a schedule is being shrunk. Fall
+                    // through to the same default as a spent plan.
+                    Some(gid) if runnable.contains(&(gid as usize)) => gid as usize,
+                    _ => previous
+                        .filter(|p| runnable.contains(p))
+                        .unwrap_or(runnable[0]),
+                }
+            }
         };
+
+        if s.trace.len() < MAX_TRACE {
+            s.trace.push(chosen as u32);
+        } else {
+            s.trace_complete = false;
+        }
+        s.current = Some(chosen);
+    }
+
+    /// The decisions this launch made, and whether the record is complete.
+    pub(crate) fn take_trace(&self) -> (Vec<u32>, bool) {
+        let mut s = self.state.lock().unwrap();
+        (std::mem::take(&mut s.trace), s.trace_complete)
     }
 
     fn block_range(&self, block: usize) -> std::ops::Range<usize> {

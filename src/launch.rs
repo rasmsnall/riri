@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::ctx::ThreadCtx;
 use crate::diag::{Diagnostic, Report, Reporter};
 use crate::dim::Dim3;
-use crate::sched::{AbortSignal, Scheduler};
+use crate::sched::{AbortSignal, Choices, Scheduler, SplitMix64};
 use crate::warp::WARP_SIZE;
 
 /// Simulated threads are real OS threads, so keep launches test-sized.
@@ -82,6 +82,19 @@ pub fn launch<F>(config: &LaunchConfig, kernel: F) -> Report
 where
     F: Fn(&ThreadCtx<'_>) + Sync,
 {
+    run(config, Choices::Random(SplitMix64(config.seed)), kernel).0
+}
+
+/// Runs a kernel against an explicit source of scheduling decisions, and
+/// returns what was found alongside the decisions that were made.
+///
+/// The second element of the returned tuple is `false` when the launch made
+/// more than `MAX_TRACE` decisions, in which case the trace is truncated and
+/// cannot be replayed.
+pub(crate) fn run<F>(config: &LaunchConfig, choices: Choices, kernel: F) -> (Report, Vec<u32>, bool)
+where
+    F: Fn(&ThreadCtx<'_>) + Sync,
+{
     let blocks = config.grid.count();
     let tpb = config.block.count();
     assert!(blocks > 0 && tpb > 0, "riri: grid and block must be non-empty");
@@ -102,7 +115,7 @@ where
     let state = LaunchState {
         id: NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed),
         config: *config,
-        sched: Scheduler::new(blocks as usize, tpb as usize, ws, config.seed),
+        sched: Scheduler::new(blocks as usize, tpb as usize, ws, choices),
         reporter: Reporter::default(),
         blocks: (0..blocks).map(|_| BlockState { shared: Mutex::new(HashMap::new()) }).collect(),
         warps: (0..blocks as usize * warps_per_block)
@@ -123,11 +136,13 @@ where
         }
     });
 
-    Report {
+    let (trace, complete) = state.sched.take_trace();
+    let report = Report {
         seed: config.seed,
         diagnostics: state.reporter.take(),
         aborted: state.sched.was_aborted(),
-    }
+    };
+    (report, trace, complete)
 }
 
 fn run_thread<F>(state: &LaunchState, kernel: &F, gid: usize)

@@ -253,6 +253,55 @@ impl fmt::Display for Diagnostic {
     }
 }
 
+fn at(loc: &Location<'static>) -> String {
+    format!("{}:{}", loc.file(), loc.line())
+}
+
+impl LaneProblem {
+    /// The variant name, without the fields that vary by schedule.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LaneProblem::CallerNotInMask => "caller-not-in-mask",
+            LaneProblem::MaskOutsideBlock { .. } => "mask-outside-block",
+            LaneProblem::SourceLaneNotInMask { .. } => "source-lane-not-in-mask",
+        }
+    }
+}
+
+impl Diagnostic {
+    /// A stable identity for this finding: its kind and the source locations
+    /// involved, but not the block, thread, or index that happened to hit it.
+    ///
+    /// Two runs that find the same bug by different interleavings agree here,
+    /// which is what lets a schedule be shrunk while checking that it still
+    /// reproduces the *same* problem rather than some other one.
+    pub fn fingerprint(&self) -> String {
+        match self {
+            Diagnostic::DataRace { first, second, .. } => {
+                let (a, b) = if first.location <= second.location {
+                    (first.location, second.location)
+                } else {
+                    (second.location, first.location)
+                };
+                format!("race@{}~{}", at(a), at(b))
+            }
+            Diagnostic::UninitRead { access, .. } => format!("uninit@{}", at(access.location)),
+            Diagnostic::OutOfBounds { access, .. } => format!("oob@{}", at(access.location)),
+            Diagnostic::BarrierDivergence { barrier, .. } => format!("barrier@{}", at(barrier)),
+            Diagnostic::WarpDivergence { op, at: loc, .. } => {
+                format!("warp-divergence:{op}@{}", at(loc))
+            }
+            Diagnostic::WarpMaskMismatch { op, at: loc, .. } => {
+                format!("warp-mask-mismatch:{op}@{}", at(loc))
+            }
+            Diagnostic::WarpLaneError { op, at: loc, problem, .. } => {
+                format!("warp-lane-error:{op}:{}@{}", problem.kind(), at(loc))
+            }
+            Diagnostic::KernelPanic { message, .. } => format!("panic:{message}"),
+        }
+    }
+}
+
 /// The result of one kernel launch under Riri.
 #[derive(Clone, Debug)]
 pub struct Report {
@@ -275,6 +324,19 @@ impl Report {
     /// True if any lane reached a warp collective that its warp-mates did not.
     pub fn has_warp_divergence(&self) -> bool {
         self.diagnostics.iter().any(|d| matches!(d, Diagnostic::WarpDivergence { .. }))
+    }
+
+    /// Every finding's [`Diagnostic::fingerprint`], sorted and de-duplicated.
+    pub fn fingerprints(&self) -> Vec<String> {
+        let mut f: Vec<String> = self.diagnostics.iter().map(Diagnostic::fingerprint).collect();
+        f.sort();
+        f.dedup();
+        f
+    }
+
+    /// True if this report contains a finding with the given fingerprint.
+    pub fn contains(&self, fingerprint: &str) -> bool {
+        self.diagnostics.iter().any(|d| d.fingerprint() == fingerprint)
     }
 
     /// Panics with a readable listing if any diagnostic was reported.

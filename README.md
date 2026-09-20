@@ -20,6 +20,12 @@ kernel -> simulated threads -> seeded scheduler -> shadow memory -> diagnostics
   checked structurally for the same reason: a diverged shuffle is caught on every seed,
   not on the unlucky one. Running the same seed twice reproduces the same schedule
   exactly, so a failure found in CI reproduces on a laptop.
+- **Shrinks a failing schedule to something readable.** A failing seed already
+  reproduces exactly, but the interleaving behind it can be hundreds of decisions long.
+  Riri cuts it down to the few that matter and hands back a short list of thread indices
+  that reproduces the finding on its own, with no seed involved. Often the answer is that
+  no decisions are needed at all, which is itself worth knowing: the bug is not an exotic
+  race, it is there whenever threads run in plain order.
 - **Understands warps, not just threads.** Warp collectives are rendezvous points. Every
   lane named by a member mask must reach the same collective with the same mask, and Riri
   checks that contract rather than trusting it. See [`docs/architecture.md`](docs/architecture.md),
@@ -119,13 +125,50 @@ assert!(report.has_race());
 assert!(report.has_warp_divergence());
 ```
 
+Searching across schedules, rather than running one, is [`explore`]:
+
+```rust
+use riri::{Explore, GlobalBuf, LaunchConfig, ThreadCtx};
+
+let found = Explore::new(&LaunchConfig::new(1, 4)).seeds(64).run_with(|| {
+    let flag = GlobalBuf::new("flag", vec![0u32; 1]);
+    let out = GlobalBuf::new("out", vec![0u32; 1]);
+    move |t: &ThreadCtx<'_>| {
+        let i = t.thread_linear();
+        if i == 0 {
+            flag.atomic_add(t, 0, 1);
+        } else if flag.atomic_add(t, 0, 0) == 0 {
+            // Racy, but only for threads that ran before thread 0 published.
+            out.write(t, 0, i as u32);
+        }
+    }
+});
+
+println!("{found}");
+```
+
+```text
+riri: explored 2 seed(s), seed 1 failed in 10 decision(s), shrunk to 5 decision(s), 2 switch(es)
+  - data race on global `out`[0]: block 0 thread 1 (Write at src/main.rs:12) conflicts with block 0 thread 3 (Write at src/main.rs:12) with no barrier between them
+  schedule: [1, 3, 3, 3, 1]
+```
+
+That schedule is the whole reproducer. Hand it to `replay` and the race comes back without
+a seed, which also means it survives any later change to how seeds are drawn.
+
+`run_with` builds fresh buffers for each run. Use plain `run` when the kernel's behaviour
+does not depend on the values it reads; if a kernel carries state between runs, Riri says
+so rather than shrinking against noise.
+
 ## Examples
 
-Two demos run a correct kernel beside a buggy one, printing both reports:
+The first two run a correct kernel beside a buggy one and print both reports. The third
+searches for a failing schedule and shrinks it:
 
 ```
 cargo run --example reduction     # block reduction, barrier removed from the loop
 cargo run --example warp_reduce   # warp reduction, shuffle hidden inside a branch
+cargo run --example shrink        # searching schedules, then shrinking the failing one
 ```
 
 ## Development
@@ -135,6 +178,7 @@ cargo build --all-targets
 cargo test
 cargo run --example reduction
 cargo run --example warp_reduce
+cargo run --example shrink
 ```
 
 These are exactly the gates CI runs, on stable and on 1.75, the declared minimum supported
@@ -164,14 +208,13 @@ model and to test kernel *algorithms*, but is not yet the full Miri move.
 1. **cuda-oxide API shim.** A `cuda_device`-compatible surface so the *same kernel source*
    runs on the GPU and under Riri behind a `cfg` switch, and so
    `DisjointSlice::get_unchecked_mut` uniqueness claims are validated at runtime.
-2. **Schedule exploration.** Systematic exploration across seeds, and minimising a failing
-   seed to a short interleaving.
-3. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
+2. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
    threads, applying Tree Borrows across lanes, so arbitrary `unsafe` in a kernel is checked
    without rewriting it.
-4. **Memory fences and weak memory** for global-memory communication.
+3. **Memory fences and weak memory** for global-memory communication.
 
-Item 0, a warp model with shuffle convergence checks, shipped in v0.2.
+Shipped: the warp model with shuffle convergence checks in v0.2, schedule exploration and
+shrinking in v0.3.
 
 ## Documentation
 
@@ -223,3 +266,4 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
 
 [`ThreadCtx`]: docs/api.md
+[`explore`]: docs/api.md

@@ -39,6 +39,7 @@
 mod ctx;
 mod diag;
 mod dim;
+mod explore;
 mod launch;
 mod mem;
 mod sched;
@@ -48,5 +49,6 @@ pub mod warp;
 pub use ctx::ThreadCtx;
 pub use diag::{Access, AccessKind, Diagnostic, LaneProblem, MemSpace, Report};
 pub use dim::Dim3;
+pub use explore::{explore, replay, Explore, Exploration, Failure, Schedule, Shrink};
 pub use launch::{launch, LaunchConfig, MAX_THREADS};
 pub use mem::{GlobalBuf, SharedArray};

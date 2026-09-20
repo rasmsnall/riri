@@ -1,11 +1,11 @@
 # riri: Architecture
 
 **Document type** Technical architecture specification
-**Status** Complete and implemented as described. Detection runs end to end for block and warp scopes.
+**Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.0
-**Date** 2026-09-19
+**Version** 1.1
+**Date** 2026-09-20
 
 ---
 
@@ -41,11 +41,16 @@
   - 3. Why the warp is blamed before the barrier
   - 4. De-duplication
 - VII. Diagnostics
-- VIII. Assessment
+- VIII. Schedule Exploration
+  - 1. Why search at all
+  - 2. Recording and replaying a schedule
+  - 3. Shrinking
+  - 4. When shrinking cannot be trusted
+- IX. Assessment
   - 1. Advantages
   - 2. Disadvantages
   - 3. Conditions under which this design is inappropriate
-- IX. Dependencies
+- X. Dependencies
 - References
 - Appendix A. Glossary
 
@@ -55,6 +60,7 @@
 - `<Table 3-1>` Ordering by scope
 - `<Table 5-1>` Warp collectives
 - `<Table 7-1>` Diagnostics
+- `<Table 8-1>` Outcomes of shrinking
 
 ### List of Figures
 
@@ -120,7 +126,7 @@ Not in scope:
 
 - Executing on a GPU, or emitting PTX. Nothing here ever touches a driver.
 - Running cuda-oxide or rust-cuda kernel source unchanged. That is Roadmap item 1, and the
-  current stage is a library emulator, as recorded in Chapter VIII, Section 2.
+  current stage is a library emulator, as recorded in Chapter IX, Section 2.
 - Rust aliasing rules, such as Tree Borrows, across lanes. That requires MIR interpretation.
 - Performance modelling of any kind. Riri says nothing about occupancy, coalescing, or
   throughput.
@@ -147,6 +153,7 @@ threads: the cap is a resource limit, not a modelling one.
 | `mem.rs` | `GlobalBuf`, `SharedArray`, the instrumented access path |
 | `shadow.rs` | Per-element access history and the concurrency rule |
 | `warp.rs` | Warp collectives and mask validation |
+| `explore.rs` | Searching across seeds, and shrinking a failing schedule |
 | `diag.rs` | `Diagnostic`, `Report`, the de-duplicating reporter |
 | `dim.rs` | `Dim3` |
 
@@ -418,7 +425,80 @@ than by unwinding.
 
 ---
 
-## VIII. Assessment
+## VIII. Schedule Exploration
+
+### 1. Why search at all
+
+Detection is happens-before based, so for most faults the schedule is close to irrelevant:
+a race between two accesses is reported because they are unordered, not because they landed
+in a bad sequence. Searching across seeds therefore finds little that a single seed did not.
+
+It earns its place on the cases where control flow depends on values that the interleaving
+decides. A thread that publishes a flag late sends its peers down a different path, and only
+some schedules take it. Those faults are invisible to one seed and ordinary to a sweep.
+
+The larger benefit is the second half: turning a failure into something short.
+
+### 2. Recording and replaying a schedule
+
+Every scheduling decision is recorded as the *global index of the thread chosen*, not its
+position among the runnable threads. Recording the thread is what lets a recording be edited
+and still mean something: a plan naming a thread that is no longer runnable is recognisably
+stale, and falls back rather than silently selecting a different thread.
+
+Replay follows the plan while it lasts. Once it is spent, the scheduler keeps the current
+thread running for as long as it can. That default matters as much as the plan: it is the
+schedule with the fewest switches available, so the tail of any shrunk schedule is the least
+surprising continuation rather than more noise.
+
+A consequence worth stating plainly: a schedule is a complete reproducer by itself. It needs
+no seed, and it survives any later change to how seeds are drawn.
+
+### 3. Shrinking
+
+Shrinking preserves a *fingerprint*: the kind of finding and the source locations involved,
+with the block, thread, and index left out, since those vary between schedules. The question
+at each step is "does this shorter schedule still find the same bug", not "does it produce an
+identical report".
+
+Two passes run in order, within a replay budget:
+
+1. **Shortest prefix.** Try the empty plan, then double the prefix length until one
+   reproduces, then bisect. This assumes a longer prefix is at least as likely to reproduce
+   as a shorter one, which is a heuristic rather than a fact, so the result is a short prefix
+   and not provably the shortest.
+2. **Fewest switches.** Walk the surviving prefix, and wherever the turn changes hands, try
+   letting the previous thread keep running instead. Keep the change when the finding
+   survives.
+
+The empty plan is tried first because it is the most useful possible answer. It means the
+default in-order schedule already hits the bug, which tells the reader that no exotic
+interleaving is involved.
+
+### 4. When shrinking cannot be trusted
+
+Shrinking replays the kernel many times, which assumes the kernel is a function of its
+schedule. A kernel that captures a buffer and mutates it is not: each run starts from the
+last run's output.
+
+Rather than shrink against that, Riri replays the full recording first and checks that the
+finding survives. If it does not, no shrinking is attempted and the reason is reported.
+
+`<Table 8-1>` Outcomes of shrinking
+
+| Outcome | Meaning |
+|---|---|
+| `Minimised` | A schedule that replays and reproduces the finding |
+| `Disabled` | Shrinking was turned off by the caller |
+| `TraceTruncated` | The run made more decisions than are recorded, so it cannot be replayed |
+| `NotReproducible` | Replaying the full recording lost the finding, so the kernel carries state between runs |
+
+The cure for `NotReproducible` is to build fresh state per run, which the API supports
+directly. See `api.md`, Chapter VII.
+
+---
+
+## IX. Assessment
 
 ### 1. Advantages
 
@@ -428,6 +508,8 @@ than by unwinding.
 - Failures name a source line rather than a symptom.
 - Warp divergence is reported instead of hanging, which is the failure mode that makes the
   same bug expensive to diagnose on hardware.
+- A failing schedule reduces to a short list of thread indices that reproduces on its own,
+  which is a reproducer that fits in a test and does not depend on the seed scheme.
 
 ### 2. Disadvantages
 
@@ -442,6 +524,10 @@ than by unwinding.
   treated as ordering nothing, which can produce false positives among their participants.
 - The 8-reader bound can miss a write-after-read race when more than 8 threads read an
   element concurrently.
+- Prefix shrinking assumes monotonicity, so it returns a short schedule rather than a
+  provably minimal one, and stops when its replay budget runs out.
+- Searching across seeds adds little for faults that detection already finds structurally.
+  It pays off only where control flow depends on values the interleaving decides.
 
 ### 3. Conditions under which this design is inappropriate
 
@@ -453,7 +539,7 @@ than by unwinding.
 
 ---
 
-## IX. Dependencies
+## X. Dependencies
 
 None. The library depends only on the Rust standard library, and has no dev-dependencies.
 This is a deliberate constraint: Riri is intended to be cheap to add to a CI job, and a

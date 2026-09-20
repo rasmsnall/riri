@@ -1,11 +1,11 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.2.0.
+**Status** Complete. Describes the surface as built, at version 0.3.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.0
-**Date** 2026-09-19
+**Version** 1.1
+**Date** 2026-09-20
 
 ---
 
@@ -40,11 +40,17 @@
   - 1. `Report`
   - 2. `Diagnostic`
   - 3. Asserting in tests
-- VII. Worked Examples
+- VII. Searching Across Schedules
+  - 1. `explore` and `Explore`
+  - 2. `run` and `run_with`
+  - 3. `Exploration` and `Failure`
+  - 4. `Schedule` and `replay`
+  - 5. When shrinking declines
+- VIII. Worked Examples
   - 1. A clean vector add
   - 2. A shared-memory reduction
   - 3. A warp reduction
-  - 4. Sweeping seeds
+  - 4. Pinning a failure with a schedule
 - Appendix A. Type index
 
 ### List of Tables
@@ -53,6 +59,8 @@
 - `<Table 3-1>` `ThreadCtx` accessors
 - `<Table 5-1>` Warp collective signatures
 - `<Table 6-1>` `Report` methods
+- `<Table 7-1>` `Explore` options
+- `<Table 7-2>` `Shrink` outcomes
 
 ---
 
@@ -90,7 +98,7 @@ Only accesses that go through `GlobalBuf`, `SharedArray`, and the `warp` collect
 checked. A kernel that communicates through an `AtomicUsize` it captured itself, or through
 a `Mutex`, is invisible to Riri and will be reported as clean regardless of what it does.
 
-This is the central constraint of the current stage. See `architecture.md`, Chapter VIII,
+This is the central constraint of the current stage. See `architecture.md`, Chapter IX,
 Section 2.
 
 ---
@@ -371,7 +379,118 @@ fails, the listing explains why far better than the boolean does.
 
 ---
 
-## VII. Worked Examples
+## VII. Searching Across Schedules
+
+### 1. `explore` and `Explore`
+
+```rust
+pub fn explore<F>(config: &LaunchConfig, seeds: u64, kernel: F) -> Exploration
+
+Explore::new(config)
+    .seeds(u64)             // default 64
+    .minimise(bool)         // default true
+    .budget(usize)          // default 256 replays
+```
+
+`explore` runs the kernel across `seeds` schedules, starting from the config's own seed,
+and stops at the first one that finds something. `Explore` is the same thing with the
+knobs exposed.
+
+`<Table 7-1>` `Explore` options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `seeds` | 64 | How many seeds to try before giving up |
+| `minimise` | true | Whether to shrink the failing schedule |
+| `budget` | 256 | How many replays shrinking may spend |
+
+Worth knowing before reaching for this: Riri finds most faults structurally, so a sweep
+rarely finds something a single seed did not. It earns its keep where control flow depends
+on values the interleaving decides, and on the shrinking rather than the search. See
+`architecture.md`, Chapter VIII, Section 1.
+
+### 2. `run` and `run_with`
+
+```rust
+Explore::new(&config).run(|t| { ... })            // one kernel, run repeatedly
+Explore::new(&config).run_with(|| { ... })        // fresh state built per run
+```
+
+`run` takes the same kernel shape as `launch`. Because exploration runs it many times, any
+buffer it captures carries its contents from one run into the next.
+
+`run_with` takes a closure that *returns* a kernel, and calls it before every run, so each
+run gets its own buffers:
+
+```rust
+Explore::new(&config).run_with(|| {
+    let out = GlobalBuf::new("out", vec![0u32; 32]);
+    move |t: &ThreadCtx<'_>| out.write(t, t.thread_linear(), 1)
+})
+```
+
+Use `run` when the kernel's behaviour does not depend on the values it reads, which is the
+common case, and `run_with` when it does.
+
+### 3. `Exploration` and `Failure`
+
+```rust
+pub struct Exploration {
+    pub seeds_tried: u64,
+    pub failure: Option<Failure>,
+}
+
+pub struct Failure {
+    pub seed: u64,
+    pub report: Report,
+    pub shrink: Shrink,
+    pub decisions: usize,   // length of the original failing schedule
+}
+```
+
+`Exploration::is_clean` and `assert_clean` mirror `Report`. `Failure::target` gives the
+fingerprint that shrinking preserved, which is the first finding in the report.
+
+`Display` prints the seeds tried, the failing seed, the original and shrunk sizes, the
+findings, and the schedule.
+
+### 4. `Schedule` and `replay`
+
+```rust
+pub fn replay<F>(config: &LaunchConfig, schedule: &Schedule, kernel: F) -> Report
+```
+
+A `Schedule` is a list of global thread indices: who gets the turn at each decision. Past
+the end of the list, the scheduler keeps the current thread running while it can, so a
+short schedule is still a complete description of a run.
+
+`Schedule::len` and `Schedule::switches` are the two numbers that say whether it is
+readable. `Schedule::new` builds one by hand, which is useful for pinning a known case.
+
+A schedule reproduces on its own. It does not use the seed, so it keeps working even if
+the way seeds are drawn ever changes.
+
+### 5. When shrinking declines
+
+`<Table 7-2>` `Shrink` outcomes
+
+| Variant | Meaning |
+|---|---|
+| `Minimised(Schedule)` | A schedule that replays and reproduces the finding |
+| `Disabled` | `minimise(false)` was set |
+| `TraceTruncated` | The run made more decisions than Riri records |
+| `NotReproducible` | Replaying the recording lost the finding |
+
+`NotReproducible` means the kernel does not behave the same way twice, almost always
+because it captures a buffer that every run mutates. `run_with` is the fix. Riri reports
+this rather than shrinking against noise.
+
+An empty `Minimised` schedule is a real result, not a failure: it means the default
+in-order schedule already reaches the bug.
+
+---
+
+## VIII. Worked Examples
 
 ### 1. A clean vector add
 
@@ -436,15 +555,19 @@ let report = launch(&LaunchConfig::new(1, 32).seed(1), |t| {
 });
 ```
 
-### 4. Sweeping seeds
+### 4. Pinning a failure with a schedule
 
-Detection does not depend on the seed, but the *reported pair* of conflicting accesses does.
-Sweeping is useful when narrowing down which accesses are involved.
+Once exploration has found and shrunk a failure, the schedule is the regression test. It
+needs no seed and does not depend on how seeds are drawn.
 
 ```rust
-for seed in 0..32 {
-    let report = launch(&LaunchConfig::new(1, 8).seed(seed), kernel);
-    assert!(report.is_clean(), "seed {seed}: {report}");
+use riri::{replay, LaunchConfig, Schedule};
+
+#[test]
+fn the_flag_race_stays_fixed() {
+    let schedule = Schedule::new(vec![1, 3, 3, 3, 1]);
+    let report = replay(&LaunchConfig::new(1, 4), &schedule, kernel);
+    report.assert_clean();
 }
 ```
 
@@ -462,6 +585,8 @@ for seed in 0..32 {
 | `GlobalBuf` | Struct | root |
 | `SharedArray` | Struct | root |
 | `Report` | Struct | root |
+| `explore`, `replay` | Functions | root |
+| `Explore`, `Exploration`, `Failure`, `Schedule`, `Shrink` | Exploration types | root |
 | `Diagnostic` | Enum | root |
 | `LaneProblem` | Enum | root |
 | `Access`, `AccessKind`, `MemSpace` | Types within diagnostics | root |
