@@ -27,7 +27,10 @@ fn tier_one_vecadd_is_clean() {
     });
 
     report.assert_clean();
-    assert_eq!(out.to_vec(), (0..128).map(|i| i as f32 + 1.0).collect::<Vec<_>>());
+    assert_eq!(
+        out.to_vec(),
+        (0..128).map(|i| i as f32 + 1.0).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -101,9 +104,7 @@ fn block_indices_match_the_launch_shape() {
 
     let report = oxide::launch(&LaunchConfig::new(2, 4).seed(1), || {
         let mut c = c.clone();
-        let packed = thread::blockIdx_x() * 100
-            + thread::threadIdx_x() * 10
-            + thread::blockDim_x();
+        let packed = thread::blockIdx_x() * 100 + thread::threadIdx_x() * 10 + thread::blockDim_x();
         if let Some((mut elem, _)) = c.get_mut_indexed() {
             *elem = packed;
         };

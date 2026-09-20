@@ -70,7 +70,12 @@ impl Schedule {
 
 impl fmt::Display for Schedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} decision(s), {} switch(es)", self.len(), self.switches())
+        write!(
+            f,
+            "{} decision(s), {} switch(es)",
+            self.len(),
+            self.switches()
+        )
     }
 }
 
@@ -111,7 +116,10 @@ impl fmt::Display for Shrink {
             Shrink::Disabled => write!(f, "not shrunk, minimisation disabled"),
             Shrink::TraceTruncated => write!(f, "not shrunk, the schedule was too long to record"),
             Shrink::NotReproducible => {
-                write!(f, "not shrunk, the kernel did not behave the same way twice")
+                write!(
+                    f,
+                    "not shrunk, the kernel did not behave the same way twice"
+                )
             }
         }
     }
@@ -198,7 +206,12 @@ impl Explore {
     /// Defaults: 64 seeds starting from the config's own, shrinking on, and a
     /// budget of 256 replays for shrinking.
     pub fn new(config: &LaunchConfig) -> Self {
-        Explore { base: *config, seeds: 64, minimise: true, budget: 256 }
+        Explore {
+            base: *config,
+            seeds: 64,
+            minimise: true,
+            budget: 256,
+        }
     }
 
     /// How many seeds to try. Exploration stops at the first failing one.
@@ -265,8 +278,7 @@ impl Explore {
             let mut config = self.base;
             config.seed = seed;
 
-            let (report, trace, complete) =
-                run_once(&config, Choices::Random(SplitMix64(seed)));
+            let (report, trace, complete) = run_once(&config, Choices::Random(SplitMix64(seed)));
             if report.is_clean() {
                 continue;
             }
@@ -275,10 +287,18 @@ impl Explore {
             let shrink = self.shrink(&config, &report, trace, complete, &run_once);
             return Exploration {
                 seeds_tried: i + 1,
-                failure: Some(Failure { seed, report, shrink, decisions }),
+                failure: Some(Failure {
+                    seed,
+                    report,
+                    shrink,
+                    decisions,
+                }),
             };
         }
-        Exploration { seeds_tried: self.seeds, failure: None }
+        Exploration {
+            seeds_tried: self.seeds,
+            failure: None,
+        }
     }
 
     fn shrink<R>(
@@ -308,7 +328,10 @@ impl Explore {
                 return false;
             }
             *budget -= 1;
-            let choices = Choices::Replay { plan: plan.to_vec(), cursor: 0 };
+            let choices = Choices::Replay {
+                plan: plan.to_vec(),
+                cursor: 0,
+            };
             run_once(config, choices).0.contains(&target)
         };
 
@@ -390,6 +413,9 @@ pub fn replay<F>(config: &LaunchConfig, schedule: &Schedule, kernel: F) -> Repor
 where
     F: Fn(&ThreadCtx<'_>) + Sync,
 {
-    let choices = Choices::Replay { plan: schedule.plan().to_vec(), cursor: 0 };
+    let choices = Choices::Replay {
+        plan: schedule.plan().to_vec(),
+        cursor: 0,
+    };
     crate::launch::run(config, choices, kernel).0
 }

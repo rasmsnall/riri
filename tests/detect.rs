@@ -17,13 +17,18 @@ fn clean_vecadd() {
     });
 
     report.assert_clean();
-    assert_eq!(c.to_vec(), (0..n).map(|i| i as f32 + 1.0).collect::<Vec<_>>());
+    assert_eq!(
+        c.to_vec(),
+        (0..n).map(|i| i as f32 + 1.0).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn every_thread_writes_same_slot() {
     let out = GlobalBuf::new("out", vec![0u32; 1]);
-    let report = launch(&LaunchConfig::new(1, 32), |t| out.write(t, 0, t.thread_linear() as u32));
+    let report = launch(&LaunchConfig::new(1, 32), |t| {
+        out.write(t, 0, t.thread_linear() as u32)
+    });
     assert!(report.has_race(), "{report}");
 }
 
@@ -51,7 +56,10 @@ fn shared_memory_missing_barrier() {
     assert!(report.has_race(), "{report}");
     assert!(report.diagnostics.iter().any(|d| matches!(
         d,
-        Diagnostic::DataRace { space: MemSpace::Shared { name: "tile", .. }, .. }
+        Diagnostic::DataRace {
+            space: MemSpace::Shared { name: "tile", .. },
+            ..
+        }
     )));
 }
 
@@ -81,7 +89,10 @@ fn uninitialised_shared_read() {
         t.sync_threads();
         let _ = tile.read(t, 8 + t.thread_linear());
     });
-    assert!(count(&report, |d| matches!(d, Diagnostic::UninitRead { .. })) > 0, "{report}");
+    assert!(
+        count(&report, |d| matches!(d, Diagnostic::UninitRead { .. })) > 0,
+        "{report}"
+    );
 }
 
 #[test]
@@ -92,7 +103,13 @@ fn barrier_in_divergent_branch() {
         }
     });
     assert!(report.aborted);
-    assert!(report.diagnostics.iter().any(|d| matches!(d, Diagnostic::BarrierDivergence { .. })), "{report}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::BarrierDivergence { .. })),
+        "{report}"
+    );
 }
 
 #[test]
@@ -119,9 +136,17 @@ fn plain_read_racing_atomics() {
 #[test]
 fn out_of_bounds_traps() {
     let buf = GlobalBuf::new("buf", vec![0u8; 30]);
-    let report = launch(&LaunchConfig::new(1, 32), |t| buf.write(t, t.thread_linear(), 1));
+    let report = launch(&LaunchConfig::new(1, 32), |t| {
+        buf.write(t, t.thread_linear(), 1)
+    });
     assert!(report.aborted);
-    assert!(report.diagnostics.iter().any(|d| matches!(d, Diagnostic::OutOfBounds { len: 30, .. })), "{report}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::OutOfBounds { len: 30, .. })),
+        "{report}"
+    );
 }
 
 #[test]
@@ -148,7 +173,14 @@ fn same_seed_same_schedule() {
     };
     assert_eq!(run(42), run(42));
     // And different seeds should explore different interleavings.
-    assert!((0..16).map(run).map(|r| r.0).collect::<std::collections::HashSet<_>>().len() > 1);
+    assert!(
+        (0..16)
+            .map(run)
+            .map(|r| r.0)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1
+    );
 }
 
 #[test]

@@ -37,7 +37,12 @@ fn checked_access<T: Copy>(
     let len = m.data.len();
     if index >= len {
         drop(m);
-        ctx.trap(Diagnostic::OutOfBounds { space: space(), index, len, access: acc });
+        ctx.trap(Diagnostic::OutOfBounds {
+            space: space(),
+            index,
+            len,
+            access: acc,
+        });
     }
 
     let cell = &mut m.shadow[index];
@@ -50,10 +55,19 @@ fn checked_access<T: Copy>(
     drop(m);
 
     if kind != AccessKind::Write && !was_init {
-        ctx.report(Diagnostic::UninitRead { space: space(), index, access: acc });
+        ctx.report(Diagnostic::UninitRead {
+            space: space(),
+            index,
+            access: acc,
+        });
     }
     if let Some(first) = conflict {
-        ctx.report(Diagnostic::DataRace { space: space(), index, first, second: acc });
+        ctx.report(Diagnostic::DataRace {
+            space: space(),
+            index,
+            first,
+            second: acc,
+        });
     }
     value
 }
@@ -71,7 +85,10 @@ pub struct GlobalBuf<T> {
 
 impl<T> Clone for GlobalBuf<T> {
     fn clone(&self) -> Self {
-        GlobalBuf { name: self.name.clone(), mem: self.mem.clone() }
+        GlobalBuf {
+            name: self.name.clone(),
+            mem: self.mem.clone(),
+        }
     }
 }
 
@@ -81,7 +98,11 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
         let shadow = vec![Cell::initialised(); data.len()];
         GlobalBuf {
             name: name.into(),
-            mem: Arc::new(Mutex::new(Instrumented { data, shadow, launch_id: 0 })),
+            mem: Arc::new(Mutex::new(Instrumented {
+                data,
+                shadow,
+                launch_id: 0,
+            })),
         }
     }
 
@@ -99,7 +120,9 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
     }
 
     fn space(&self) -> MemSpace {
-        MemSpace::Global { buffer: self.name.clone() }
+        MemSpace::Global {
+            buffer: self.name.clone(),
+        }
     }
 
     fn reset(m: &mut Instrumented<T>) {
@@ -114,15 +137,33 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
 
     #[track_caller]
     pub fn read(&self, ctx: &ThreadCtx<'_>, index: usize) -> T {
-        checked_access(&self.mem, ctx, || self.space(), index, AccessKind::Read, Location::caller(), Self::reset, |v| *v)
+        checked_access(
+            &self.mem,
+            ctx,
+            || self.space(),
+            index,
+            AccessKind::Read,
+            Location::caller(),
+            Self::reset,
+            |v| *v,
+        )
     }
 
     #[track_caller]
     pub fn write(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) {
-        checked_access(&self.mem, ctx, || self.space(), index, AccessKind::Write, Location::caller(), Self::reset, |v| {
-            *v = value;
-            value
-        });
+        checked_access(
+            &self.mem,
+            ctx,
+            || self.space(),
+            index,
+            AccessKind::Write,
+            Location::caller(),
+            Self::reset,
+            |v| {
+                *v = value;
+                value
+            },
+        );
     }
 }
 
@@ -131,11 +172,20 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
     /// other, only with concurrent plain accesses.
     #[track_caller]
     pub fn atomic_add(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) -> T {
-        checked_access(&self.mem, ctx, || self.space(), index, AccessKind::Atomic, Location::caller(), Self::reset, |v| {
-            let old = *v;
-            *v = old + value;
-            old
-        })
+        checked_access(
+            &self.mem,
+            ctx,
+            || self.space(),
+            index,
+            AccessKind::Atomic,
+            Location::caller(),
+            Self::reset,
+            |v| {
+                let old = *v;
+                *v = old + value;
+                old
+            },
+        )
     }
 }
 
@@ -198,13 +248,23 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
             if checked {
                 return None;
             }
-            ctx.trap(Diagnostic::OutOfBounds { space: self.space(), index, len, access: acc });
+            ctx.trap(Diagnostic::OutOfBounds {
+                space: self.space(),
+                index,
+                len,
+                access: acc,
+            });
         }
 
         // Reporting takes a different lock, so this is safe to do while the
         // element stays borrowed.
         if let Some(first) = m.shadow[index].on_write(acc) {
-            ctx.report(Diagnostic::DataRace { space: self.space(), index, first, second: acc });
+            ctx.report(Diagnostic::DataRace {
+                space: self.space(),
+                index,
+                first,
+                second: acc,
+            });
         }
         Some(ElemMut { guard: m, index })
     }
@@ -225,7 +285,9 @@ pub struct SharedArray<T> {
 
 impl<T> Clone for SharedArray<T> {
     fn clone(&self) -> Self {
-        SharedArray { inner: self.inner.clone() }
+        SharedArray {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -243,7 +305,9 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
     }
 
     pub(crate) fn from_any(a: Arc<dyn Any + Send + Sync>) -> Option<Self> {
-        a.downcast::<SharedInner<T>>().ok().map(|inner| SharedArray { inner })
+        a.downcast::<SharedInner<T>>()
+            .ok()
+            .map(|inner| SharedArray { inner })
     }
 
     pub fn len(&self) -> usize {
@@ -255,7 +319,10 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
     }
 
     fn space(&self) -> MemSpace {
-        MemSpace::Shared { block: self.inner.block, name: self.inner.name }
+        MemSpace::Shared {
+            block: self.inner.block,
+            name: self.inner.name,
+        }
     }
 
     fn reset(m: &mut Instrumented<T>) {
@@ -267,14 +334,32 @@ impl<T: Copy + Default + Send + 'static> SharedArray<T> {
 
     #[track_caller]
     pub fn read(&self, ctx: &ThreadCtx<'_>, index: usize) -> T {
-        checked_access(&self.inner.mem, ctx, || self.space(), index, AccessKind::Read, Location::caller(), Self::reset, |v| *v)
+        checked_access(
+            &self.inner.mem,
+            ctx,
+            || self.space(),
+            index,
+            AccessKind::Read,
+            Location::caller(),
+            Self::reset,
+            |v| *v,
+        )
     }
 
     #[track_caller]
     pub fn write(&self, ctx: &ThreadCtx<'_>, index: usize, value: T) {
-        checked_access(&self.inner.mem, ctx, || self.space(), index, AccessKind::Write, Location::caller(), Self::reset, |v| {
-            *v = value;
-            value
-        });
+        checked_access(
+            &self.inner.mem,
+            ctx,
+            || self.space(),
+            index,
+            AccessKind::Write,
+            Location::caller(),
+            Self::reset,
+            |v| {
+                *v = value;
+                value
+            },
+        );
     }
 }

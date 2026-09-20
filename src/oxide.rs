@@ -84,9 +84,9 @@ thread_local! {
 fn with_ctx<R>(f: impl FnOnce(&ThreadCtx<'_>) -> R) -> R {
     CURRENT.with(|cell| {
         let bound = cell.borrow();
-        let bound = bound.as_ref().expect(
-            "riri: a cuda-oxide device function was called outside riri::oxide::launch",
-        );
+        let bound = bound
+            .as_ref()
+            .expect("riri: a cuda-oxide device function was called outside riri::oxide::launch");
         let ctx = ThreadCtx {
             launch: &bound.state,
             block: bound.block,
@@ -184,7 +184,11 @@ pub mod thread {
     use std::panic::Location;
 
     fn witness<'k>(index: usize) -> ThreadIndex<'k> {
-        ThreadIndex { index, _not_send: PhantomData, _scope: PhantomData }
+        ThreadIndex {
+            index,
+            _not_send: PhantomData,
+            _scope: PhantomData,
+        }
     }
 
     /// `blockIdx.x * blockDim.x + threadIdx.x`, as an owned witness.
@@ -256,7 +260,9 @@ pub struct DisjointSlice<T> {
 
 impl<T> Clone for DisjointSlice<T> {
     fn clone(&self) -> Self {
-        DisjointSlice { buf: self.buf.clone() }
+        DisjointSlice {
+            buf: self.buf.clone(),
+        }
     }
 }
 
@@ -283,7 +289,14 @@ impl<T: Copy + Send + 'static> DisjointSlice<T> {
         let at = Location::caller();
         let index = with_ctx(|t| t.global_linear());
         let elem = with_ctx(|t| self.buf.elem_mut(t, index, true, at))?;
-        Some((elem, ThreadIndex { index, _not_send: PhantomData, _scope: PhantomData }))
+        Some((
+            elem,
+            ThreadIndex {
+                index,
+                _not_send: PhantomData,
+                _scope: PhantomData,
+            },
+        ))
     }
 
     /// Resolves an explicit witness, bounds checked.
@@ -384,7 +397,9 @@ pub mod warp {
     #[track_caller]
     pub fn all(predicate: bool) -> bool {
         let at = Location::caller();
-        with_ctx(|t| crate::warp::ballot(t, t.warp_valid_mask(), predicate, "all", at) == t.warp_valid_mask())
+        with_ctx(|t| {
+            crate::warp::ballot(t, t.warp_valid_mask(), predicate, "all", at) == t.warp_valid_mask()
+        })
     }
 
     #[track_caller]

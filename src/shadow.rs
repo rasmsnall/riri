@@ -49,7 +49,10 @@ pub(crate) struct Cell {
 
 impl Cell {
     pub(crate) fn initialised() -> Self {
-        Cell { init: true, ..Default::default() }
+        Cell {
+            init: true,
+            ..Default::default()
+        }
     }
 
     /// Records a read; returns a concurrent earlier write, if any.
@@ -101,7 +104,15 @@ mod tests {
         warp_epoch: u64,
         kind: AccessKind,
     ) -> Access {
-        Access { block, thread, epoch, warp, warp_epoch, kind, location: Location::caller() }
+        Access {
+            block,
+            thread,
+            epoch,
+            warp,
+            warp_epoch,
+            kind,
+            location: Location::caller(),
+        }
     }
 
     #[test]
@@ -144,7 +155,9 @@ mod tests {
     fn warp_collective_orders_accesses_in_that_warp() {
         let mut c = Cell::initialised();
         c.on_write(warp_acc(0, 0, 0, 0, 0, AccessKind::Write));
-        assert!(c.on_read(warp_acc(0, 1, 0, 0, 1, AccessKind::Read)).is_none());
+        assert!(c
+            .on_read(warp_acc(0, 1, 0, 0, 1, AccessKind::Read))
+            .is_none());
     }
 
     #[test]
@@ -152,6 +165,8 @@ mod tests {
         let mut c = Cell::initialised();
         c.on_write(warp_acc(0, 0, 0, 0, 1, AccessKind::Write));
         // Warp 1 never took part, so its accesses are still concurrent.
-        assert!(c.on_read(warp_acc(0, 32, 0, 1, 0, AccessKind::Read)).is_some());
+        assert!(c
+            .on_read(warp_acc(0, 32, 0, 1, 0, AccessKind::Read))
+            .is_some());
     }
 }

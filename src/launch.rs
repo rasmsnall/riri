@@ -27,7 +27,12 @@ pub struct LaunchConfig {
 
 impl LaunchConfig {
     pub fn new(grid: impl Into<Dim3>, block: impl Into<Dim3>) -> Self {
-        LaunchConfig { grid: grid.into(), block: block.into(), seed: 0, warp_size: WARP_SIZE }
+        LaunchConfig {
+            grid: grid.into(),
+            block: block.into(),
+            seed: 0,
+            warp_size: WARP_SIZE,
+        }
     }
 
     /// Sets the scheduler seed. Different seeds explore different
@@ -115,7 +120,10 @@ where
 {
     let blocks = config.grid.count();
     let tpb = config.block.count();
-    assert!(blocks > 0 && tpb > 0, "riri: grid and block must be non-empty");
+    assert!(
+        blocks > 0 && tpb > 0,
+        "riri: grid and block must be non-empty"
+    );
     assert!(
         config.warp_size.is_power_of_two() && config.warp_size <= 32,
         "riri: warp size must be a power of two no greater than 32, got {}",
@@ -135,9 +143,15 @@ where
         config: *config,
         sched: Scheduler::new(blocks as usize, tpb as usize, ws, choices),
         reporter: Reporter::default(),
-        blocks: (0..blocks).map(|_| BlockState { shared: Mutex::new(HashMap::new()) }).collect(),
+        blocks: (0..blocks)
+            .map(|_| BlockState {
+                shared: Mutex::new(HashMap::new()),
+            })
+            .collect(),
         warps: (0..blocks as usize * warps_per_block)
-            .map(|_| WarpState { slots: Mutex::new((0..ws).map(|_| None).collect()) })
+            .map(|_| WarpState {
+                slots: Mutex::new((0..ws).map(|_| None).collect()),
+            })
             .collect(),
         warps_per_block,
     });
@@ -168,7 +182,12 @@ where
     F: Fn(&Arc<LaunchState>, &ThreadCtx<'_>) + Sync,
 {
     let tpb = state.config.block.count() as usize;
-    let ctx = ThreadCtx { launch: state, block: (gid / tpb) as u32, thread: (gid % tpb) as u32, gid };
+    let ctx = ThreadCtx {
+        launch: state,
+        block: (gid / tpb) as u32,
+        thread: (gid % tpb) as u32,
+        gid,
+    };
 
     if state.sched.wait_turn(gid).is_err() {
         return;
@@ -182,7 +201,11 @@ where
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic payload>".into());
-            state.reporter.push(Diagnostic::KernelPanic { block: ctx.block, thread: ctx.thread, message });
+            state.reporter.push(Diagnostic::KernelPanic {
+                block: ctx.block,
+                thread: ctx.thread,
+                message,
+            });
             state.sched.abort();
         }
     }

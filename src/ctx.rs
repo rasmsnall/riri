@@ -87,7 +87,12 @@ impl<'l> ThreadCtx<'l> {
     /// callers reached through a closure, where `#[track_caller]` does not
     /// survive.
     pub(crate) fn sync_threads_at(&self, loc: &'static Location<'static>) {
-        if self.launch.sched.barrier(self.gid, loc, &self.launch.reporter).is_err() {
+        if self
+            .launch
+            .sched
+            .barrier(self.gid, loc, &self.launch.reporter)
+            .is_err()
+        {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }
     }
@@ -97,23 +102,43 @@ impl<'l> ThreadCtx<'l> {
     /// Elements start uninitialised: reading before writing is reported.
     ///
     /// Panics if the same name is reused with a different type or length.
-    pub fn shared<T: Copy + Default + Send + 'static>(&self, name: &'static str, len: usize) -> SharedArray<T> {
-        let mut map = self.launch.blocks[self.block as usize].shared.lock().unwrap();
+    pub fn shared<T: Copy + Default + Send + 'static>(
+        &self,
+        name: &'static str,
+        len: usize,
+    ) -> SharedArray<T> {
+        let mut map = self.launch.blocks[self.block as usize]
+            .shared
+            .lock()
+            .unwrap();
         let entry = map
             .entry(name)
-            .or_insert_with(|| Arc::new(SharedArray::<T>::new_inner(self.block, name, len)) as Arc<dyn Any + Send + Sync>)
+            .or_insert_with(|| {
+                Arc::new(SharedArray::<T>::new_inner(self.block, name, len))
+                    as Arc<dyn Any + Send + Sync>
+            })
             .clone();
         drop(map);
-        let arr = SharedArray::<T>::from_any(entry)
-            .unwrap_or_else(|| panic!("riri: shared array `{name}` reused with a different element type"));
-        assert_eq!(arr.len(), len, "riri: shared array `{name}` reused with a different length");
+        let arr = SharedArray::<T>::from_any(entry).unwrap_or_else(|| {
+            panic!("riri: shared array `{name}` reused with a different element type")
+        });
+        assert_eq!(
+            arr.len(),
+            len,
+            "riri: shared array `{name}` reused with a different length"
+        );
         arr
     }
 
     // ----- crate-internal instrumentation hooks -----
 
     pub(crate) fn schedule_point(&self) {
-        if self.launch.sched.yield_now(self.gid, &self.launch.reporter).is_err() {
+        if self
+            .launch
+            .sched
+            .yield_now(self.gid, &self.launch.reporter)
+            .is_err()
+        {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }
     }
@@ -147,10 +172,10 @@ impl<'l> ThreadCtx<'l> {
         at: &'static Location<'static>,
         op: &'static str,
     ) {
-        let r = self
-            .launch
-            .sched
-            .warp_rendezvous(self.gid, phase, mask, at, op, &self.launch.reporter);
+        let r =
+            self.launch
+                .sched
+                .warp_rendezvous(self.gid, phase, mask, at, op, &self.launch.reporter);
         if r.is_err() {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }

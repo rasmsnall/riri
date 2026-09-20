@@ -46,13 +46,19 @@ fn the_shrunk_schedule_replays_the_same_finding() {
 
     let failure = found.failure.expect("expected a failure");
     let target = failure.target().expect("expected a target fingerprint");
-    let schedule = failure.shrink.schedule().expect("expected a shrunk schedule");
+    let schedule = failure
+        .shrink
+        .schedule()
+        .expect("expected a shrunk schedule");
 
     let mut replayed = LaunchConfig::new(1, 8);
     replayed.seed = failure.seed;
     let report = replay(&replayed, schedule, |t| racy(t, &out));
 
-    assert!(report.contains(&target), "replay lost the finding: {report}");
+    assert!(
+        report.contains(&target),
+        "replay lost the finding: {report}"
+    );
 }
 
 #[test]
@@ -115,16 +121,18 @@ fn a_kernel_that_carries_state_is_reported_as_unreproducible() {
 fn run_with_gives_each_run_its_own_state() {
     // The same kernel as above, but with fresh buffers per run, so every run
     // behaves identically and shrinking works.
-    let found = Explore::new(&LaunchConfig::new(1, 4)).seeds(4).run_with(|| {
-        let runs = GlobalBuf::new("runs", vec![0u32; 1]);
-        let out = GlobalBuf::new("out", vec![0u32; 1]);
-        move |t: &ThreadCtx<'_>| {
-            let seen = runs.atomic_add(t, 0, 1);
-            if seen < 4 {
-                out.write(t, 0, 1);
+    let found = Explore::new(&LaunchConfig::new(1, 4))
+        .seeds(4)
+        .run_with(|| {
+            let runs = GlobalBuf::new("runs", vec![0u32; 1]);
+            let out = GlobalBuf::new("out", vec![0u32; 1]);
+            move |t: &ThreadCtx<'_>| {
+                let seen = runs.atomic_add(t, 0, 1);
+                if seen < 4 {
+                    out.write(t, 0, 1);
+                }
             }
-        }
-    });
+        });
 
     let failure = found.failure.expect("expected a failure");
     assert!(
@@ -148,7 +156,10 @@ fn shrinking_a_long_run_cuts_it_down() {
     });
 
     let failure = found.failure.expect("expected a failure");
-    let schedule = failure.shrink.schedule().expect("expected a shrunk schedule");
+    let schedule = failure
+        .shrink
+        .schedule()
+        .expect("expected a shrunk schedule");
 
     // Three buffer operations per thread across 64 threads is on the order of
     // 200 decisions. The shrunk schedule should be a small fraction of that.

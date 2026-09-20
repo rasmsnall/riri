@@ -268,7 +268,10 @@ impl Scheduler {
     /// so a single access sees a consistent pair.
     pub(crate) fn epochs(&self, block: usize, warp: usize) -> (u64, u64) {
         let s = self.state.lock().unwrap();
-        (s.barrier_gen[block], s.warp_gen[self.warp_gen_index(block, warp)])
+        (
+            s.barrier_gen[block],
+            s.warp_gen[self.warp_gen_index(block, warp)],
+        )
     }
 
     // ------------------------------------------------------- deadlock ---
@@ -285,8 +288,12 @@ impl Scheduler {
                 let stuck: Vec<u32> = (0..self.lanes_in(warp))
                     .filter(|&l| s.status[base + l as usize] == Status::AtWarp)
                     .collect();
-                let Some(&first) = stuck.first() else { continue };
-                let Some(wait) = s.warp_wait[base + first as usize] else { continue };
+                let Some(&first) = stuck.first() else {
+                    continue;
+                };
+                let Some(wait) = s.warp_wait[base + first as usize] else {
+                    continue;
+                };
                 let arrived = self.arrived_mask(s, block, warp, &wait);
                 reporter.push(Diagnostic::WarpDivergence {
                     block: block as u32,
@@ -302,7 +309,10 @@ impl Scheduler {
         if !reported {
             for block in 0..self.blocks {
                 let range = self.block_range(block);
-                let waiting = range.clone().filter(|&i| s.status[i] == Status::AtBarrier).count();
+                let waiting = range
+                    .clone()
+                    .filter(|&i| s.status[i] == Status::AtBarrier)
+                    .count();
                 if waiting == 0 {
                     continue;
                 }
@@ -328,7 +338,10 @@ impl Scheduler {
 
     fn barrier_divergence(&self, s: &mut State, block: usize, reporter: &Reporter) {
         let range = self.block_range(block);
-        let waiting = range.clone().filter(|&i| s.status[i] == Status::AtBarrier).count();
+        let waiting = range
+            .clone()
+            .filter(|&i| s.status[i] == Status::AtBarrier)
+            .count();
         let exited = range.filter(|&i| s.status[i] == Status::Finished).count();
         let d = Diagnostic::BarrierDivergence {
             block: block as u32,
@@ -384,7 +397,12 @@ impl Scheduler {
     ) -> Result<(), AbortSignal> {
         let (block, warp, lane) = self.locate(me);
         let base = self.warp_base(block, warp);
-        let wait = WarpWait { phase, mask, at, op };
+        let wait = WarpWait {
+            phase,
+            mask,
+            at,
+            op,
+        };
 
         let mut s = self.state.lock().unwrap();
         s.status[me] = Status::AtWarp;
@@ -421,12 +439,13 @@ impl Scheduler {
             if p == me || s.status[p] != Status::AtWarp {
                 continue;
             }
-            let Some(other) = s.warp_wait[p] else { continue };
+            let Some(other) = s.warp_wait[p] else {
+                continue;
+            };
             if other.phase != phase || other.at != at || other.mask == mask {
                 continue;
             }
-            let claims_each_other =
-                mask & (1u32 << l) != 0 || other.mask & (1u32 << lane) != 0;
+            let claims_each_other = mask & (1u32 << l) != 0 || other.mask & (1u32 << lane) != 0;
             if !claims_each_other {
                 continue;
             }
@@ -444,9 +463,9 @@ impl Scheduler {
             return Err(AbortSignal);
         }
 
-        let complete = members.iter().all(|&p| {
-            s.status[p] == Status::AtWarp && s.warp_wait[p] == Some(wait)
-        });
+        let complete = members
+            .iter()
+            .all(|&p| s.status[p] == Status::AtWarp && s.warp_wait[p] == Some(wait));
         if complete {
             for &p in &members {
                 s.status[p] = Status::Runnable;
@@ -494,7 +513,10 @@ impl Scheduler {
             return;
         }
 
-        if self.block_range(block).any(|i| s.status[i] == Status::AtBarrier) {
+        if self
+            .block_range(block)
+            .any(|i| s.status[i] == Status::AtBarrier)
+        {
             self.barrier_divergence(&mut s, block, reporter);
             return;
         }

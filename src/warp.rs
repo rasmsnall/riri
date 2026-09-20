@@ -89,7 +89,10 @@ impl Lanes<'_> {
             .and_then(|s| s.as_ref())
             .unwrap_or_else(|| panic!("riri: lane {lane} published no value to `{}`", self.op));
         *slot.downcast_ref::<T>().unwrap_or_else(|| {
-            panic!("riri: `{}` called with different value types on different lanes", self.op)
+            panic!(
+                "riri: `{}` called with different value types on different lanes",
+                self.op
+            )
         })
     }
 }
@@ -135,7 +138,13 @@ where
     let lane = ctx.lane_id();
     let valid = ctx.warp_valid_mask();
     if mask & !valid != 0 {
-        ctx.trap(lane_error(ctx, op, at, mask, LaneProblem::MaskOutsideBlock { valid }));
+        ctx.trap(lane_error(
+            ctx,
+            op,
+            at,
+            mask,
+            LaneProblem::MaskOutsideBlock { valid },
+        ));
     }
     if mask & (1u32 << lane) == 0 {
         ctx.trap(lane_error(ctx, op, at, mask, LaneProblem::CallerNotInMask));
@@ -167,7 +176,13 @@ fn shuffle<T: Copy + Send + 'static>(
         // which CUDA defines as returning the lane's own value.
         let Some(src) = src else { return value };
         if mask & (1u32 << src) == 0 {
-            ctx.report(lane_error(ctx, op, at, mask, LaneProblem::SourceLaneNotInMask { src }));
+            ctx.report(lane_error(
+                ctx,
+                op,
+                at,
+                mask,
+                LaneProblem::SourceLaneNotInMask { src },
+            ));
             return value;
         }
         lanes.get::<T>(src)
@@ -242,7 +257,10 @@ pub(crate) fn shfl_down_sync_at<T: Copy + Send + 'static>(
     delta: u32,
     at: &'static Location<'static>,
 ) -> T {
-    let src = ctx.lane_id().checked_add(delta).filter(|&s| s < ctx.warp_size());
+    let src = ctx
+        .lane_id()
+        .checked_add(delta)
+        .filter(|&s| s < ctx.warp_size());
     shuffle(ctx, mask, "shfl_down_sync", at, value, src)
 }
 

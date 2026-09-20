@@ -86,7 +86,9 @@ fn order_dependent() {
         println!("   no schedule reached the racy branch");
         return;
     };
-    let Some(schedule) = failure.shrink.schedule() else { return };
+    let Some(schedule) = failure.shrink.schedule() else {
+        return;
+    };
 
     println!(
         "   {} decisions shrunk to {}: {:?}",

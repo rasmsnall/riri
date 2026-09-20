@@ -136,7 +136,13 @@ fn lanes_disagreeing_about_the_mask() {
     });
 
     assert!(
-        has(&report, |d| matches!(d, Diagnostic::WarpMaskMismatch { op: "shfl_sync", .. })),
+        has(&report, |d| matches!(
+            d,
+            Diagnostic::WarpMaskMismatch {
+                op: "shfl_sync",
+                ..
+            }
+        )),
         "{report}"
     );
 }
@@ -174,7 +180,10 @@ fn caller_left_itself_out_of_the_mask() {
     assert!(
         has(&report, |d| matches!(
             d,
-            Diagnostic::WarpLaneError { problem: LaneProblem::CallerNotInMask, .. }
+            Diagnostic::WarpLaneError {
+                problem: LaneProblem::CallerNotInMask,
+                ..
+            }
         )),
         "{report}"
     );
@@ -192,7 +201,10 @@ fn mask_naming_lanes_the_block_does_not_have() {
     assert!(
         has(&report, |d| matches!(
             d,
-            Diagnostic::WarpLaneError { problem: LaneProblem::MaskOutsideBlock { .. }, .. }
+            Diagnostic::WarpLaneError {
+                problem: LaneProblem::MaskOutsideBlock { .. },
+                ..
+            }
         )),
         "{report}"
     );

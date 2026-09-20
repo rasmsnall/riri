@@ -294,7 +294,12 @@ impl Diagnostic {
             Diagnostic::WarpMaskMismatch { op, at: loc, .. } => {
                 format!("warp-mask-mismatch:{op}@{}", at(loc))
             }
-            Diagnostic::WarpLaneError { op, at: loc, problem, .. } => {
+            Diagnostic::WarpLaneError {
+                op,
+                at: loc,
+                problem,
+                ..
+            } => {
                 format!("warp-lane-error:{op}:{}@{}", problem.kind(), at(loc))
             }
             Diagnostic::KernelPanic { message, .. } => format!("panic:{message}"),
@@ -318,17 +323,25 @@ impl Report {
     }
 
     pub fn has_race(&self) -> bool {
-        self.diagnostics.iter().any(|d| matches!(d, Diagnostic::DataRace { .. }))
+        self.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DataRace { .. }))
     }
 
     /// True if any lane reached a warp collective that its warp-mates did not.
     pub fn has_warp_divergence(&self) -> bool {
-        self.diagnostics.iter().any(|d| matches!(d, Diagnostic::WarpDivergence { .. }))
+        self.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::WarpDivergence { .. }))
     }
 
     /// Every finding's [`Diagnostic::fingerprint`], sorted and de-duplicated.
     pub fn fingerprints(&self) -> Vec<String> {
-        let mut f: Vec<String> = self.diagnostics.iter().map(Diagnostic::fingerprint).collect();
+        let mut f: Vec<String> = self
+            .diagnostics
+            .iter()
+            .map(Diagnostic::fingerprint)
+            .collect();
         f.sort();
         f.dedup();
         f
@@ -336,7 +349,9 @@ impl Report {
 
     /// True if this report contains a finding with the given fingerprint.
     pub fn contains(&self, fingerprint: &str) -> bool {
-        self.diagnostics.iter().any(|d| d.fingerprint() == fingerprint)
+        self.diagnostics
+            .iter()
+            .any(|d| d.fingerprint() == fingerprint)
     }
 
     /// Panics with a readable listing if any diagnostic was reported.
@@ -366,7 +381,11 @@ impl fmt::Display for Report {
 
 const MAX_DIAGNOSTICS: usize = 64;
 
-type DedupKey = (String, &'static Location<'static>, Option<&'static Location<'static>>);
+type DedupKey = (
+    String,
+    &'static Location<'static>,
+    Option<&'static Location<'static>>,
+);
 
 /// Collects diagnostics, de-duplicating by kind and source location so a
 /// racy line in a 1024-thread kernel produces one report, not a thousand.
@@ -391,12 +410,12 @@ impl Reporter {
             Diagnostic::BarrierDivergence { block, barrier, .. } => {
                 (format!("barrier{block}"), barrier, None)
             }
-            Diagnostic::WarpDivergence { block, warp, at, .. } => {
-                (format!("warpdiv{block}:{warp}"), at, None)
-            }
-            Diagnostic::WarpMaskMismatch { block, warp, at, .. } => {
-                (format!("warpmask{block}:{warp}"), at, None)
-            }
+            Diagnostic::WarpDivergence {
+                block, warp, at, ..
+            } => (format!("warpdiv{block}:{warp}"), at, None),
+            Diagnostic::WarpMaskMismatch {
+                block, warp, at, ..
+            } => (format!("warpmask{block}:{warp}"), at, None),
             Diagnostic::WarpLaneError { problem, at, .. } => {
                 (format!("warplane{problem:?}"), at, None)
             }
