@@ -1,10 +1,10 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.5.0.
+**Status** Complete. Describes the surface as built, at version 0.6.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.5
+**Version** 1.6
 **Date** 2026-09-20
 
 ---
@@ -233,7 +233,8 @@ kernel bug rather than a detected fault.
 ### 1. `GlobalBuf`
 
 ```rust
-let a = GlobalBuf::new("a", vec![1.0f32; 64]);
+let a = GlobalBuf::new("a", vec![1.0f32; 64]);   // filled from the host
+let b = GlobalBuf::uninit("b", 64);              // device memory, nothing written
 
 a.read(t, i) -> T
 a.write(t, i, value)
@@ -248,6 +249,14 @@ is what appears in a race report.
 
 Indexing out of range is a trapped fault, not a panic: Riri reports `OutOfBounds` and
 aborts the launch.
+
+`uninit` is for output buffers, which arrive holding whatever the allocator last left. An
+element read before any thread wrote it is reported as `UninitRead`, which is the check
+Compute Sanitizer calls `initcheck`, and the bug it usually finds is a kernel filling only
+part of its output. `T: Default` supplies something to occupy the elements; those values
+mean nothing, and reaching them is the fault. Once written, an element stays initialised
+for the rest of the buffer's life, including across later launches, because that is how
+device memory behaves.
 
 ### 2. `SharedArray`
 

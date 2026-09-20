@@ -71,6 +71,7 @@ until a compiler or architecture change removes it.
 | Shuffles reading a lane outside the mask | Yes |
 | Cross-block handoffs missing a `threadfence` or release/acquire pair | Yes |
 | Reads of uninitialised shared memory | Yes |
+| Reads of global memory nothing has written | Yes, from `GlobalBuf::uninit` |
 | Out-of-bounds accesses and kernel panics, reported as traps | Yes |
 | cuda-oxide `get_unchecked_mut` claiming one element twice | Yes |
 | Rust aliasing violations, Tree Borrows across lanes | Not yet, see Roadmap |
@@ -338,6 +339,29 @@ diagnostic naming the missing lanes, rather than as a kernel that never finishes
 The only dynamic check for any of this today is NVIDIA Compute Sanitizer, which needs a real
 GPU and knows nothing about Rust's semantics. Riri aims to be to GPU kernels what Miri is to
 CPU `unsafe` code: a tool that runs in CI and names the line.
+
+## Against Compute Sanitizer
+
+The incumbent for GPU kernels is NVIDIA's Compute Sanitizer, which is four tools. Riri
+covers most of the same ground and is ahead on races, but the two are not substitutes:
+Compute Sanitizer points at a real binary on real hardware at real scale, and Riri checks a
+kernel written against its own API or the cuda-oxide shim, capped at 16,384 threads.
+
+| Check | Compute Sanitizer | Riri |
+|---|---|---|
+| Out-of-bounds access | `memcheck` | Yes, reported as a trap |
+| Misaligned access, leaks | `memcheck` | No: Riri indexes elements and models no allocator |
+| Data races | `racecheck`, shared memory | Shared, global, and cross-block with fences |
+| Uninitialised reads | `initcheck`, global memory | Shared, and global from `GlobalBuf::uninit` |
+| Synchronisation hazards | `synccheck` | Barrier and warp divergence, mask disagreement, shuffle sources |
+
+Two differences are worth the space. Riri decides races from happens-before rather than from
+the execution it watched, so it reports a race whose bad interleaving never occurred. And it
+needs no GPU, so it runs on every pull request rather than on a machine with a device in it.
+
+Compute Sanitizer works at the C++ and PTX level and, as cuda-oxide's documentation puts it,
+knows nothing about Rust's semantics. Riri will never check a C++ kernel. They are tools for
+different languages that happen to look for the same bugs.
 
 ## Prior art
 

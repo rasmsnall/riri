@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.5
+**Version** 1.6
 **Date** 2026-09-20
 
 ---
@@ -130,7 +130,8 @@ In scope:
 - Data races on global and shared memory, within and across blocks.
 - Barrier divergence at block scope.
 - Warp collective convergence, member mask agreement, and shuffle source validity.
-- Uninitialised shared-memory reads, out-of-bounds accesses, and kernel panics.
+- Uninitialised reads of shared memory, and of global memory declared uninitialised,
+  plus out-of-bounds accesses and kernel panics.
 
 Not in scope:
 
@@ -312,9 +313,16 @@ within a block and so not what the clocks are for. A lane that releases immediat
 ### 1. Per-element state
 
 Every element of every instrumented buffer carries a shadow cell: an initialised flag, the
-last write, and a bounded set of recent readers. Shadow state is per launch. Global memory
-keeps its values across launches but resets its access history; shared memory resets both,
-since it is created fresh per launch and starts uninitialised.
+last write, a bounded set of recent readers, and whatever a release has published to it.
+Shadow state is per launch. Global memory keeps its values across launches but resets its
+access history; shared memory resets both, since it is created fresh per launch and starts
+uninitialised.
+
+The initialised flag is what makes a read of memory nobody has written reportable. Shared
+memory starts uninitialised by construction. A global buffer can too, through
+`GlobalBuf::uninit`, which is how an output allocation arrives before a kernel fills it.
+The flag survives the per-launch reset, because device memory written by one launch is not
+uninitialised for the next.
 
 ### 2. Reads and writes
 

@@ -135,6 +135,36 @@ impl<T: Copy + Send + 'static> GlobalBuf<T> {
         }
     }
 
+    /// Creates a buffer of device memory that nothing has written yet, the way
+    /// an output allocation arrives before a kernel fills it.
+    ///
+    /// Reading an element before some thread has written it is reported as
+    /// [`Diagnostic::UninitRead`], which is the check Compute Sanitizer's
+    /// `initcheck` performs. The usual bug it finds is a kernel that fills
+    /// only part of its output, leaving the rest to be read as whatever the
+    /// allocator last left there.
+    ///
+    /// The elements hold `T::default()` so that something is there to read;
+    /// those values carry no meaning, and a read that reaches them is the
+    /// fault being reported. Once written, an element stays initialised for
+    /// the rest of the buffer's life, including across later launches, since
+    /// that is how device memory behaves.
+    ///
+    /// [`Diagnostic::UninitRead`]: crate::Diagnostic::UninitRead
+    pub fn uninit(name: &str, len: usize) -> Self
+    where
+        T: Default,
+    {
+        GlobalBuf {
+            name: name.into(),
+            mem: Arc::new(Mutex::new(Instrumented {
+                data: (0..len).map(|_| T::default()).collect(),
+                shadow: vec![Cell::default(); len],
+                launch_id: 0,
+            })),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.mem.lock().unwrap().data.len()
     }
