@@ -18,6 +18,26 @@
 //! ([`Diagnostic::WarpMaskMismatch`]), and shuffles that read from a lane
 //! outside the mask ([`Diagnostic::WarpLaneError`]).
 //!
+//! # Wrapping a collective
+//!
+//! Collectives are told apart by the call site, which `#[track_caller]` makes
+//! the caller's line rather than a line in this module. A helper of your own
+//! that wraps a collective should carry `#[track_caller]` for the same
+//! reason:
+//!
+//! ```
+//! use riri::{warp, ThreadCtx};
+//!
+//! #[track_caller]
+//! fn broadcast(t: &ThreadCtx<'_>, mask: u32, v: u32) -> u32 {
+//!     warp::shfl_sync(t, mask, v, 0)
+//! }
+//! ```
+//!
+//! Without it every call site reports the helper's own line, so two groups
+//! that diverged before calling it look like one converged group. They
+//! rendezvous, and the divergence goes unreported.
+//!
 //! ```
 //! use riri::{launch, warp, GlobalBuf, LaunchConfig};
 //!

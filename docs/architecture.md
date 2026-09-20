@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.1
+**Version** 1.2
 **Date** 2026-09-20
 
 ---
@@ -35,6 +35,7 @@
   - 3. Why there are two phases
   - 4. Convergence failures
   - 5. Mask errors
+  - 6. How a collective is identified
 - VI. Failure Model
   - 1. Reported faults and trapped faults
   - 2. Deadlock as a diagnostic
@@ -361,6 +362,31 @@ one lane and need no rendezvous to diagnose.
 The first two are checked before the lane parks, so they abort rather than producing a
 convergence failure as a secondary effect.
 
+### 6. How a collective is identified
+
+A collective is identified by the source location of the call, captured with
+`#[track_caller]` so that it is the caller's line rather than a line inside `warp.rs`.
+Lanes rendezvous when they agree on that location and on the mask.
+
+Two consequences follow, and they pull in opposite directions.
+
+The reassuring one is that lanes cannot drift apart within a mask. The departure phase of
+Chapter V, Section 3 releases mask-mates together, so a lane cannot reach iteration two of
+a collective while a mask-mate is still at iteration one. Loops whose trip count varies by
+lane are therefore caught in the ordinary way: the lane wanting another turn waits for
+lanes that have moved on, and that is a convergence failure like any other.
+
+The limiting one is that a location is not a program counter. A helper of the user's own
+that wraps a collective reports *its* line for every call site unless it is itself marked
+`#[track_caller]`. Two diverged groups calling that helper from different places then look
+like one converged group, they rendezvous, and nothing is reported. This is a false
+negative, and the only one in the warp model that is known and not yet closed.
+
+Marking such a helper `#[track_caller]` restores the distinction, which makes it the
+recommended practice for any wrapper around a collective. Closing the gap properly needs
+call-path identity rather than a single frame, which is out of reach without either a
+backtrace on every collective or MIR-level interpretation.
+
 ---
 
 ## VI. Failure Model
@@ -517,9 +543,9 @@ directly. See `api.md`, Chapter VII.
   being ported, which is the largest limitation and the reason Roadmap item 1 exists.
 - One OS thread per simulated GPU thread caps launches at 16,384 threads and makes large
   launches slow.
-- A collective is identified by its source location, so two lanes at the same line in
-  different loop iterations are treated as converged. Divergence across iterations of one
-  loop is not detected.
+- A collective is identified by its source location, so a helper wrapping a collective
+  hides divergence between its call sites unless it is marked `#[track_caller]`. See
+  Chapter V, Section 6.
 - Epoch counters are coarser than vector clocks. Partial-mask collectives are conservatively
   treated as ordering nothing, which can produce false positives among their participants.
 - The 8-reader bound can miss a write-after-read race when more than 8 threads read an

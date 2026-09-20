@@ -4,7 +4,7 @@
 //! Most tests use a small warp size so a whole warp fits in a few lanes and
 //! the expected results can be written out by hand.
 
-use riri::{launch, warp, Diagnostic, GlobalBuf, LaneProblem, LaunchConfig};
+use riri::{launch, warp, Diagnostic, GlobalBuf, LaneProblem, LaunchConfig, ThreadCtx};
 
 fn has<F: Fn(&Diagnostic) -> bool>(r: &riri::Report, f: F) -> bool {
     r.diagnostics.iter().any(f)
@@ -238,6 +238,68 @@ fn divergence_is_caught_on_every_schedule() {
         });
         assert!(report.has_warp_divergence(), "seed {seed}: {report}");
     }
+}
+
+#[test]
+fn unequal_loop_counts_are_caught() {
+    // Lanes disagree about how many times to go round, at one source line.
+    // The departure rendezvous keeps mask-mates in lockstep, so the lane that
+    // wants another turn is left waiting for lanes that have moved on.
+    let report = launch(&LaunchConfig::new(1, 8).warp_size(8).seed(1), |t| {
+        let mask = t.warp_valid_mask();
+        let iters = if t.lane_id() < 4 { 2 } else { 3 };
+        let mut v = t.lane_id();
+        for _ in 0..iters {
+            v = warp::shfl_sync(t, mask, v, 0);
+        }
+    });
+
+    assert!(report.has_warp_divergence(), "{report}");
+}
+
+#[test]
+fn a_tracked_helper_keeps_its_call_sites_apart() {
+    #[track_caller]
+    fn reduce(t: &ThreadCtx<'_>, mask: u32, v: u32) -> u32 {
+        warp::shfl_sync(t, mask, v, 0)
+    }
+
+    // The two halves call the collective from different sites, so the warp is
+    // diverged. `#[track_caller]` makes each site its own location, which is
+    // what lets Riri tell them apart.
+    let report = launch(&LaunchConfig::new(1, 8).warp_size(8).seed(1), |t| {
+        let mask = t.warp_valid_mask();
+        if t.lane_id() < 4 {
+            reduce(t, mask, 1);
+        } else {
+            reduce(t, mask, 2);
+        }
+    });
+
+    assert!(report.has_warp_divergence(), "{report}");
+}
+
+#[test]
+fn known_gap_an_untracked_helper_hides_divergence() {
+    // The same kernel with the `#[track_caller]` removed. Both call sites now
+    // report the helper's own line, so Riri sees one collective where the
+    // hardware sees two, rendezvouses the diverged halves together, and finds
+    // nothing. This test pins that gap rather than hiding it: if it ever
+    // starts failing, the gap has been closed and the docs should say so.
+    fn reduce(t: &ThreadCtx<'_>, mask: u32, v: u32) -> u32 {
+        warp::shfl_sync(t, mask, v, 0)
+    }
+
+    let report = launch(&LaunchConfig::new(1, 8).warp_size(8).seed(1), |t| {
+        let mask = t.warp_valid_mask();
+        if t.lane_id() < 4 {
+            reduce(t, mask, 1);
+        } else {
+            reduce(t, mask, 2);
+        }
+    });
+
+    assert!(report.is_clean(), "gap closed, update the docs: {report}");
 }
 
 // ------------------------------------------------------ happens-before ---

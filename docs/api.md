@@ -4,7 +4,7 @@
 **Status** Complete. Describes the surface as built, at version 0.3.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.1
+**Version** 1.2
 **Date** 2026-09-20
 
 ---
@@ -282,6 +282,26 @@ Riri enforces rather than assumes, is:
    `WarpDivergence` or `WarpMaskMismatch`.
 
 `warp::FULL_MASK` is every lane of a full warp. `warp::WARP_SIZE` is 32, the default.
+
+Riri tells collectives apart by the call site, which `#[track_caller]` makes the caller's
+line. If you wrap a collective in a helper of your own, mark that helper `#[track_caller]`
+too:
+
+```rust
+#[track_caller]
+fn warp_reduce(t: &ThreadCtx<'_>, mask: u32, mut v: u32) -> u32 {
+    let mut delta = t.warp_size() / 2;
+    while delta > 0 {
+        v += warp::shfl_down_sync(t, mask, v, delta);
+        delta /= 2;
+    }
+    v
+}
+```
+
+Without it every call site collapses onto the helper's own line, and two diverged groups
+calling it from different places look converged, so Riri reports nothing. See
+`architecture.md`, Chapter V, Section 6.
 
 ### 2. Shuffles
 

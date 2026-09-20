@@ -60,7 +60,7 @@ until a compiler or architecture change removes it.
 | Reads of uninitialised shared memory | Yes |
 | Out-of-bounds accesses and kernel panics, reported as traps | Yes |
 | Rust aliasing violations, Tree Borrows across lanes | Not yet, see Roadmap |
-| Divergence between iterations of the same loop | Not yet, see Scope |
+| Divergence between two call sites of one helper | Only if the helper is `#[track_caller]`, see Scope |
 
 ## Usage
 
@@ -192,9 +192,13 @@ model and to test kernel *algorithms*, but is not yet the full Miri move.
 
 - Kernels must use Riri's types. It does not yet run cuda-oxide or rust-cuda source
   unchanged. Closing that gap is Roadmap item 1.
-- A collective is identified by its source location, so two lanes at the same line in
-  *different loop iterations* are treated as converged. Divergence across iterations of one
-  loop is not caught.
+- A collective is identified by its source location, which is the call site thanks to
+  `#[track_caller]`. Wrapping a collective in a helper of your own collapses every call site
+  onto the helper's line, and two diverged groups calling that helper look to Riri like one
+  converged group, so the divergence is missed. Put `#[track_caller]` on any helper that
+  wraps a collective and the call sites stay distinct. Lanes that go round a loop a
+  different number of times *are* caught, because the departure rendezvous keeps mask-mates
+  in lockstep.
 - Member masks are `u32`, so warp sizes above 32 are not modelled. `LaunchConfig::warp_size`
   accepts any power of two up to 32, which is mainly useful for writing small readable warp
   tests. AMD 64-lane wavefronts are out of scope.
