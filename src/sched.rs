@@ -92,7 +92,13 @@ pub(crate) struct Scheduler {
     warp_size: usize,
     warps_per_block: usize,
     state: Mutex<State>,
-    cv: Condvar,
+    /// One per thread rather than one for all of them.
+    ///
+    /// A handoff wakes exactly the thread that now holds the turn. Waking
+    /// every blocked thread so that one of them can proceed costs a wakeup
+    /// per thread per scheduling decision, which is quadratic in the launch
+    /// and was what kept blocks small.
+    cvs: Vec<Condvar>,
 }
 
 impl Scheduler {
@@ -123,7 +129,7 @@ impl Scheduler {
             warp_size,
             warps_per_block,
             state: Mutex::new(state),
-            cv: Condvar::new(),
+            cvs: (0..total).map(|_| Condvar::new()).collect(),
         }
     }
 
@@ -230,7 +236,7 @@ impl Scheduler {
             if s.current == Some(me) {
                 return Ok(());
             }
-            s = self.cv.wait(s).unwrap();
+            s = self.cvs[me].wait(s).unwrap();
         }
     }
 
@@ -246,7 +252,7 @@ impl Scheduler {
             // wedged. Work out who is waiting on whom and say so.
             self.detect_stuck(&mut s, reporter);
         }
-        self.cv.notify_all();
+        self.wake(&s);
         loop {
             if s.aborted {
                 return Err(AbortSignal);
@@ -254,7 +260,7 @@ impl Scheduler {
             if s.current == Some(me) {
                 return Ok(());
             }
-            s = self.cv.wait(s).unwrap();
+            s = self.cvs[me].wait(s).unwrap();
         }
     }
 
@@ -331,7 +337,22 @@ impl Scheduler {
     fn fail(&self, s: &mut State, d: Diagnostic, reporter: &Reporter) {
         reporter.push(d);
         s.aborted = true;
-        self.cv.notify_all();
+        self.wake(s);
+    }
+
+    /// Wakes whoever needs to run next.
+    ///
+    /// An abort wakes everyone, because every thread has to notice it and
+    /// unwind. Otherwise exactly one thread holds the turn, and only that one
+    /// has anything to do.
+    fn wake(&self, s: &State) {
+        if s.aborted {
+            for cv in &self.cvs {
+                cv.notify_one();
+            }
+        } else if let Some(next) = s.current {
+            self.cvs[next].notify_one();
+        }
     }
 
     // -------------------------------------------------------- barriers ---
@@ -526,14 +547,14 @@ impl Scheduler {
             // The last runnable thread exited while others are still parked.
             self.detect_stuck(&mut s, reporter);
         }
-        self.cv.notify_all();
+        self.wake(&s);
     }
 
     /// Stops the launch (trap-like errors). All waiting threads unwind.
     pub(crate) fn abort(&self) {
         let mut s = self.state.lock().unwrap();
         s.aborted = true;
-        self.cv.notify_all();
+        self.wake(&s);
     }
 
     pub(crate) fn was_aborted(&self) -> bool {

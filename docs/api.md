@@ -1,10 +1,10 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.7.0.
+**Status** Complete. Describes the surface as built, at version 0.8.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.7
+**Version** 1.8
 **Date** 2026-09-20
 
 ---
@@ -19,7 +19,7 @@
   - 1. `launch`
   - 2. `LaunchConfig`
   - 3. `Dim3`
-  - 4. Limits
+  - 4. Waves and limits
 - III. The Thread Context
   - 1. Indices
   - 2. Warp geometry
@@ -137,6 +137,7 @@ the kernel.
 LaunchConfig::new(grid, block)      // both impl Into<Dim3>
     .seed(u64)                      // default 0
     .warp_size(u32)                 // default 32
+    .resident_blocks(u32)           // default: the whole grid
 ```
 
 `<Table 2-1>` `LaunchConfig` fields
@@ -147,6 +148,7 @@ LaunchConfig::new(grid, block)      // both impl Into<Dim3>
 | `block` | `Dim3` | Threads per block |
 | `seed` | `u64` | Fixes the schedule. The same seed replays the same interleaving |
 | `warp_size` | `u32` | Lanes per warp. A power of two no greater than 32 |
+| `resident_blocks` | `Option<u32>` | How many blocks run at once. `None` is all of them |
 
 `warp_size` exists mainly so that warp behaviour can be tested at a readable scale. A block
 of 8 with a warp size of 8 is one full warp whose expected results can be written out by
@@ -164,10 +166,33 @@ Dim3::count(&self) -> u32           // x * y * z
 usually written as `LaunchConfig::new(4, 32)` rather than with explicit `Dim3` values.
 Linearisation is x-fastest, matching CUDA.
 
-### 4. Limits
+### 4. Waves and limits
 
-`MAX_THREADS` is 16,384. Each simulated thread is an OS thread, so the cap is a resource
-limit. Exceeding it panics with a message naming the requested count.
+`MAX_THREADS` is 16,384, and it bounds the threads *resident at once* rather than the
+launch. Each simulated thread is an OS thread, so that is a resource limit.
+
+`resident_blocks` says how many blocks run together; the rest follow in waves, which is how
+hardware schedules blocks onto multiprocessors. A grid of any size runs as long as one wave
+fits:
+
+```rust
+// 17,408 threads, four blocks resident at a time.
+LaunchConfig::new(17u32, 1024u32).resident_blocks(4)
+```
+
+Three consequences.
+
+Race detection is unchanged. Accesses from different blocks are unordered whether or not
+they overlapped in time, so a race between waves is reported exactly as one within a wave.
+
+A block can no longer see one in a later wave. That is the point: CUDA does not promise two
+blocks are co-resident unless the launch was cooperative, and a kernel that assumes it is
+relying on something the hardware may not give. Riri runs everything at once by default,
+which is the permissive reading; setting this models the stricter one.
+
+A multi-wave launch cannot be replayed or shrunk, because each wave numbers its threads from
+zero and a recorded plan would drive the wrong ones. `explore` reports
+`Shrink::TraceTruncated` for these.
 
 ---
 

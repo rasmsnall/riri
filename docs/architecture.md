@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.7
+**Version** 1.8
 **Date** 2026-09-20
 
 ---
@@ -20,6 +20,8 @@
   - 2. The turn
   - 3. Scheduling points
   - 4. Determinism
+  - 5. Waves
+  - 6. The cost of a handoff
 - III. Happens-Before Model
   - 1. Scopes and epochs
   - 2. The concurrency rule
@@ -155,8 +157,9 @@ Not in scope:
 ### 1. Simulated threads
 
 Each GPU thread is backed by one OS thread, spawned inside a `std::thread::scope` so that
-the kernel closure can borrow from the caller. This is why launches are capped at 16,384
-threads: the cap is a resource limit, not a modelling one.
+the kernel closure can borrow from the caller. That is why 16,384 threads can be resident at
+once: the cap is a resource limit, not a modelling one, and it bounds a wave rather than a
+launch. See Section 5.
 
 `<Table 2-1>` Module map
 
@@ -213,6 +216,42 @@ in both `tests/detect.rs` and `tests/warp.rs`.
 Different seeds explore different interleavings. Because detection is happens-before based
 rather than observational, changing the seed changes *which* accesses are reported as the
 conflicting pair, not *whether* a race is found.
+
+### 5. Waves
+
+A grid larger than one wave runs in several, `LaunchConfig::resident_blocks` blocks at a
+time. Each wave gets its own scheduler covering only the blocks resident in it; everything
+that must outlive a wave is shared, since a race between waves has to be seen as readily as
+one within a wave.
+
+That it can be seen is the point worth checking. Detection is happens-before based, and
+accesses from different blocks are unordered by Chapter III's rule whether or not they
+overlapped in time. Serialising blocks therefore costs no detection at all, which is what
+makes waves cheap here when they would be ruinous for a tool that watched executions.
+
+What waves do change is visibility. A block cannot observe one that has not run, so a
+kernel waiting on a later wave makes no progress. That is a faithful model rather than a
+limitation: CUDA does not promise two blocks are co-resident unless the launch was
+cooperative, and a kernel relying on it has a bug that all-resident scheduling hides.
+
+Threads are numbered twice as a result. A *slot* is the index within the wave, which is what
+the scheduler knows; the block and thread the kernel sees, and the global index the clocks
+use, belong to the launch. Confusing the two is the obvious mistake, and it surfaces as an
+index out of bounds in the scheduler rather than as quiet nonsense.
+
+Schedules are not recorded across waves, because a plan is a list of slots and each wave
+numbers its slots from zero. Replaying one would drive the wrong threads, so Riri declines.
+
+### 6. The cost of a handoff
+
+Only one thread runs at a time, so every scheduling decision has to wake the thread that
+now holds the turn. Waking *all* blocked threads so that one of them can proceed costs a
+wakeup per thread per decision, which is quadratic in the launch: a 1024-thread block spent
+3.2 seconds where 64 threads spent 13 milliseconds.
+
+Each thread therefore waits on its own condition variable, and a handoff notifies exactly
+one. The same block then takes 36 milliseconds. An abort still wakes everyone, because
+every thread has to notice it and unwind.
 
 ---
 
@@ -699,8 +738,8 @@ of Riri is.
 - The shim is written from cuda-oxide's published API reference rather than compiled against
   `cuda-device`, which is unpublished and pins a nightly toolchain. Signatures can drift and
   nothing here would notice.
-- One OS thread per simulated GPU thread caps launches at 16,384 threads and makes large
-  launches slow.
+- One OS thread per simulated GPU thread caps residency at 16,384 threads. A larger grid
+  runs in waves, at the cost of being unable to replay or shrink it.
 - A collective is identified by its source location, so a helper wrapping a collective
   hides divergence between its call sites unless it is marked `#[track_caller]`. See
   Chapter V, Section 6.

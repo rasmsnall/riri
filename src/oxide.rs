@@ -75,6 +75,7 @@ struct Bound {
     block: u32,
     thread: u32,
     gid: usize,
+    slot: usize,
 }
 
 thread_local! {
@@ -93,6 +94,7 @@ fn with_ctx<R>(f: impl FnOnce(&ThreadCtx<'_>) -> R) -> R {
             block: bound.block,
             thread: bound.thread,
             gid: bound.gid,
+            slot: bound.slot,
         };
         f(&ctx)
     })
@@ -150,6 +152,7 @@ where
                     block: ctx.block,
                     thread: ctx.thread,
                     gid: ctx.gid,
+                    slot: ctx.slot,
                 });
             });
             let _unbind = Unbind;

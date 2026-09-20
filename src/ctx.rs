@@ -16,10 +16,18 @@ pub struct ThreadCtx<'l> {
     pub(crate) launch: &'l LaunchState,
     pub(crate) block: u32,
     pub(crate) thread: u32,
+    /// Global thread index, which the clocks and the kernel both use.
     pub(crate) gid: usize,
+    /// Index within the resident wave, which is what the scheduler knows.
+    pub(crate) slot: usize,
 }
 
 impl<'l> ThreadCtx<'l> {
+    /// This thread's block as the current wave numbers it.
+    fn wave_block(&self) -> usize {
+        self.slot / self.launch.config.block.count() as usize
+    }
+
     pub fn thread_idx(&self) -> Dim3 {
         Dim3::from_linear(self.thread, self.launch.config.block)
     }
@@ -101,7 +109,7 @@ impl<'l> ThreadCtx<'l> {
         if self
             .launch
             .sched
-            .barrier(self.gid, loc, &self.launch.reporter)
+            .barrier(self.slot, loc, &self.launch.reporter)
             .is_err()
         {
             std::panic::resume_unwind(Box::new(AbortSignal));
@@ -170,7 +178,7 @@ impl<'l> ThreadCtx<'l> {
         if self
             .launch
             .sched
-            .yield_now(self.gid, &self.launch.reporter)
+            .yield_now(self.slot, &self.launch.reporter)
             .is_err()
         {
             std::panic::resume_unwind(Box::new(AbortSignal));
@@ -189,7 +197,7 @@ impl<'l> ThreadCtx<'l> {
         location: &'static Location<'static>,
     ) -> (Access, Clock) {
         let warp = self.warp_id();
-        let (epoch, warp_epoch) = self.launch.sched.epochs(self.block as usize, warp as usize);
+        let (epoch, warp_epoch) = self.launch.sched.epochs(self.wave_block(), warp as usize);
 
         let mut sync = self.launch.sync.lock().unwrap();
         let seq = sync.tick(self.gid, key(self.block, self.thread));
@@ -241,10 +249,14 @@ impl<'l> ThreadCtx<'l> {
         at: &'static Location<'static>,
         op: &'static str,
     ) {
-        let r =
-            self.launch
-                .sched
-                .warp_rendezvous(self.gid, phase, mask, at, op, &self.launch.reporter);
+        let r = self.launch.sched.warp_rendezvous(
+            self.slot,
+            phase,
+            mask,
+            at,
+            op,
+            &self.launch.reporter,
+        );
         if r.is_err() {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }

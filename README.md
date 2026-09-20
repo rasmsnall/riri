@@ -52,6 +52,11 @@ kernel -> simulated threads -> seeded scheduler -> shadow memory -> diagnostics
   collective orders that warp alone. A partial mask orders nothing, because it says nothing
   about the lanes it leaves out. Warp-synchronous code that is correct is reported clean,
   and code that leans on lockstep execution is not.
+- **Scales to real launch shapes.** Handing the turn from one thread to the next wakes
+  exactly the thread that gets it, so a launch costs time proportional to the work rather
+  than to the square of its thread count. A 1024-thread block went from 3.2s to 36ms when
+  that changed. Grids larger than what fits at once run in waves, the way hardware
+  schedules blocks onto multiprocessors.
 - **Runs in ordinary CI.** No GPU, no driver, no `unsafe`, and no dependencies outside the
   standard library. It is a normal `cargo test`.
 
@@ -162,6 +167,20 @@ launch(&LaunchConfig::new(2, 1), |t| {
 Remove either fence and the read of `data` is reported against the write, because nothing
 then orders the two blocks. `atomic_store(.., Ordering::Release)` paired with
 `atomic_load(.., Ordering::Acquire)` does the same job without the fences.
+
+A grid too large to hold at once runs in waves, which is also what hardware does:
+
+```rust
+// 17,408 threads, four blocks resident at a time.
+launch(&LaunchConfig::new(17u32, 1024u32).resident_blocks(4), |t| {
+    out.write(t, t.global_linear(), t.global_linear() as u32);
+});
+```
+
+Races are unaffected, because accesses from different blocks are unordered whether or not
+they overlapped in time. What does change is that a block can no longer see one in a later
+wave, which is precisely the assumption CUDA says a kernel may not make without a
+cooperative launch.
 
 Searching across schedules, rather than running one, is [`explore`]:
 
@@ -292,7 +311,10 @@ memory surface, which is enough to prove out the detection model and to test ker
   checks synchronisation, not visibility.
 - Each element remembers at most 8 recent readers. Beyond that, some write-after-read races
   can be missed.
-- Launches are capped at 16,384 threads, because each simulated thread is an OS thread.
+- 16,384 threads can be resident at once, because each simulated thread is an OS thread.
+  That bounds a wave rather than the grid: `LaunchConfig::resident_blocks` says how many
+  blocks run together, and a larger grid runs in waves. A multi-wave launch cannot be
+  replayed or shrunk, since each wave numbers its threads from zero.
 
 ## Roadmap
 
