@@ -296,9 +296,11 @@ memory surface, which is enough to prove out the detection model and to test ker
 1. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
    threads, applying Tree Borrows across lanes, so arbitrary `unsafe` in a kernel is checked
    without rewriting it. It would also close the helper-location gap for free, since MIR
-   gives real program counters. A driver that reaches MIR through `rustc_public` exists in
-   [`riri-mir/`](riri-mir/), but it only extracts and prints; nothing interprets yet, and it
-   needs a pinned nightly with `rustc-dev`, so it is not part of this crate or its CI.
+   gives real program counters. [`riri-mir/`](riri-mir/) reaches MIR through `rustc_public`
+   and now interprets scalar bodies, matching Rust on arithmetic, signedness, casts and
+   overflow traps. It has no memory model, no calls and no SIMT layer yet, so it checks
+   nothing. It needs a pinned nightly with `rustc-dev` and is not part of this crate or
+   its CI.
 
 Shipped: the warp model with shuffle convergence checks in v0.2, schedule exploration and
 shrinking in v0.3, the cuda-oxide shim in v0.4, release and acquire ordering in v0.5.

@@ -3,11 +3,15 @@
 A rustc driver that extracts MIR, as the first step towards interpreting GPU
 kernels rather than executing them against an instrumented API.
 
-**Status: a skeleton.** It does no interpretation. It compiles a crate
-normally, enters the `rustc_public` context once analysis is finished, and
-prints the MIR of the functions it finds. What it establishes is that the
-pipeline works, which is the part worth proving before an interpreter is
-written against it.
+**Status: it interprets scalars.** It compiles a crate normally, enters the
+`rustc_public` context once analysis is finished, and either prints a
+function's MIR or runs it.
+
+What it evaluates is the shape a body actually has once rustc is done with it:
+locals, assignments, checked arithmetic with the overflow `Assert` rustc
+attaches, comparisons at the right signedness, `SwitchInt`, casts, and tuple
+fields. What it does not have is memory, calls, or any of the SIMT layer, which
+is to say it is not yet a GPU interpreter. See [What comes next](#what-comes-next).
 
 ## Why it is separate from `riri`
 
@@ -56,9 +60,21 @@ export PATH="$(cygpath -u "$(rustc --print sysroot)")/bin:$PATH"
 On Linux or macOS the equivalent is `LD_LIBRARY_PATH` or `DYLD_LIBRARY_PATH`
 pointing at `$(rustc --print sysroot)/lib`.
 
-Set `RIRI_MIR_ONLY` to a substring to print only the functions that match.
+Set `RIRI_MIR_ONLY` to a substring to print only the functions that match, or
+`RIRI_MIR_RUN` to interpret them instead of printing them:
 
-Output for the bundled fixture:
+```sh
+RIRI_MIR_RUN=sum_to_ten ./target/debug/riri-mir \
+  --edition 2021 --crate-type lib fixtures/interp.rs --out-dir fixtures/out
+```
+
+```text
+interp::sum_to_ten = 45_u32
+```
+
+Printing rather than running gives the MIR itself, which is what an
+interpreter consumes:
+
 
 ```text
 fn kernel::scatter
@@ -80,6 +96,33 @@ fn kernel::scatter
 That is the material an interpreter needs: assignments, checked arithmetic,
 bounds checks as explicit `Assert` terminators, and indexed stores.
 
+## Checking it
+
+`./check.sh` runs every body in `fixtures/interp.rs` and diffs the results
+against `fixtures/expected.txt`. There is no CI for this crate, so that script
+stands in for one.
+
+The expected values are not hand-computed. `fixtures/check.rs` includes the
+same file and runs the same functions natively, so the two can be compared
+directly:
+
+```text
+interpreted                                          native
+interp::sum_to_ten = 45_u32                          sum_to_ten = 45
+interp::signed_division = -2_i32                     signed_division = -2
+interp::truncating_cast = 44_u8                      truncating_cast = 44
+interp::sign_extending_cast = -3_i64                 sign_extending_cast = -3
+interp::comparisons = true                           comparisons = true
+interp::shifts = 32_u32                              shifts = 32
+interp::overflows stopped: attempt to add            overflows panicked = true
+  with overflow
+```
+
+The last row is the one worth looking at: the interpreter honours the `Assert`
+terminator rustc emits for checked arithmetic, and reports it in the words the
+panic would have used. `comparisons` is the other one, since it returns `true`
+only if `-1 < 1` was decided as signed.
+
 ## Not in CI
 
 Building this needs a pinned nightly and the `rustc-dev` component, which is a
@@ -88,18 +131,23 @@ This is built by hand for now.
 
 ## What comes next
 
-In rough order, each of which is a project rather than a task:
+Done so far: a value model for scalars and aggregates, and evaluation of the
+statements and terminators that do not touch memory.
 
-1. A value model: scalars, aggregates, and pointers with provenance.
-2. A memory model, so a `Place` resolves to an address and Riri's existing
-   shadow memory can record the access.
-3. Statement and terminator evaluation, plus shims for the intrinsics and
-   library calls a kernel reaches.
-4. The SIMT layer: one interpreter state per lane, driven by the scheduler the
-   library already has.
-5. Tree Borrows across lanes, which is the point of the exercise and the thing
-   no amount of API instrumentation can reach.
+What remains, in rough order, each a project rather than a task:
 
-Step 4 is where this rejoins `riri`: the scheduler, shadow memory, and
-diagnostics are all reusable as they stand. Steps 1 to 3 are the cost of
-admission, and they are what Miri spent years on.
+1. **Memory.** A `Place` has to resolve to an address rather than a slot, with
+   provenance attached, before `Deref`, `Index`, `Ref` or `AddressOf` mean
+   anything. This is the step that unlocks the rest, and the one where Riri's
+   existing shadow memory starts being reusable.
+2. **Calls.** A call stack, plus shims for the intrinsics and library functions
+   a kernel reaches. Miri has hundreds of these; a kernel subset is smaller but
+   not small.
+3. **The SIMT layer.** One interpreter state per lane, driven by the scheduler
+   the library already has. This is where the two halves of the project meet,
+   and where the existing scheduler, shadow memory and diagnostics pay off.
+4. **Tree Borrows across lanes**, which is the point of the exercise and the
+   thing no amount of API instrumentation can reach.
+
+Step 1 is the next one to do and the largest single jump. Everything up to now
+has been a body that computes; nothing has touched a pointer.

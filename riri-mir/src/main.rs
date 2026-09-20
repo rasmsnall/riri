@@ -41,6 +41,9 @@ extern crate rustc_public;
 extern crate rustc_public_bridge;
 extern crate rustc_session;
 
+mod interp;
+mod value;
+
 use rustc_driver::{Callbacks, Compilation};
 use rustc_middle::ty::TyCtxt;
 use rustc_public::CrateDef;
@@ -64,6 +67,7 @@ impl Callbacks for Riri {
 }
 
 fn dump() {
+    let run = std::env::var("RIRI_MIR_RUN").ok();
     let only = std::env::var("RIRI_MIR_ONLY").ok();
     for item in rustc_public::all_local_items() {
         let name = item.name();
@@ -74,6 +78,18 @@ fn dump() {
         }
         // An item with no body is a declaration, not a definition.
         let Some(body) = item.body() else { continue };
+
+        // With RIRI_MIR_RUN set, interpret the matching function instead of
+        // printing it.
+        if let Some(target) = &run {
+            if name.contains(target.as_str()) {
+                match interp::Interp::run(&body) {
+                    Ok(value) => println!("{name} = {value}"),
+                    Err(why) => println!("{name} stopped: {why}"),
+                }
+            }
+            continue;
+        }
 
         println!("fn {name}");
         println!("  {} block(s), {} local(s)", body.blocks.len(), body.locals().len());

@@ -1,0 +1,7 @@
+interp::sum_to_ten = 45_u32
+interp::signed_division = -2_i32
+interp::truncating_cast = 44_u8
+interp::sign_extending_cast = -3_i64
+interp::comparisons = true
+interp::shifts = 32_u32
+interp::overflows stopped: attempt to add with overflow
