@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.3
+**Version** 1.4
 **Date** 2026-09-20
 
 ---
@@ -561,7 +561,7 @@ same element is an ordinary data race naming both lines.
 | `thread::sync_threads` | Covered |
 | `DisjointSlice::get_mut_indexed`, `get_mut`, `get_unchecked_mut`, `len` | Covered |
 | `warp` shuffles, votes, `lane_id`, `warp_id` | Covered, unsuffixed forms only |
-| `SharedArray`, `DynamicSharedArray` | Absent, see Section 5 |
+| `SharedArray`, `DynamicSharedArray` | Absent by decision, see Section 5 |
 | 2D and tiled index spaces, managed barriers, clusters, TMA | Absent |
 
 ### 2. Giving a context-free API a context
@@ -603,16 +603,26 @@ why `warp.rs` carries an `_at` variant of each public function.
 
 ### 5. Shared memory, and why it is absent
 
-cuda-oxide declares shared memory as `static mut TILE: SharedArray<T, N>`. A static is one
-object, and Riri runs every block of a launch at once, so all blocks would share it. Correct
-behaviour needs one instance per block.
+cuda-oxide's `SharedArray` is not a container. It is `#[repr(transparent)]` over
+`PhantomData`, a zero-sized marker their compiler recognises and backs with storage in
+address space 3, and every accessor on it is `unreachable!("called outside CUDA kernel
+context")`. There is no off-device implementation to borrow.
 
-Routing each access to per-block storage is straightforward. Returning a reference into it
-is not: `Index` and `IndexMut` on a static cannot borrow from per-block storage without
-either `unsafe` or a different spelling in the kernel source. Since one of those costs
-Riri's freedom from `unsafe` and the other costs the source compatibility the shim exists
-for, this is a decision to be taken deliberately rather than a task to be finished. Kernels
-needing shared memory use `ThreadCtx::shared` meanwhile.
+Riri would therefore have to supply real storage. Per-block instancing, which looks like
+the hard part, is not: blocks are never ordered against each other, so running them one at
+a time would give each block its own instance and cost no detection at all. The obstacle is
+narrower and firmer. `Index` and `IndexMut` hand out references, the storage starts
+uninitialised, and a lock cannot return a reference, so the only route is `MaybeUninit`
+behind `unsafe`. That would cost Riri its freedom from `unsafe`, which is a property worth
+more than one surface.
+
+The spelling is also unsettled. Under edition 2024 the `static mut` access in their own
+examples runs into `static_mut_refs`, and they have added `as_raw_mut_ptr` with
+`&raw mut SCRATCH` as the pattern for threads deriving disjoint pointers. Building against
+`Index` now would be building against something already being superseded.
+
+Kernels needing shared memory use `ThreadCtx::shared`, which is checked exactly as the rest
+of Riri is.
 
 ---
 

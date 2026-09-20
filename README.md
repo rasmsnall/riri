@@ -229,9 +229,10 @@ memory surface, which is enough to prove out the detection model and to test ker
   the warp collectives. A kernel that talks to itself through a captured `AtomicUsize` is
   invisible and will be reported clean.
 - The cuda-oxide shim covers Tier 1 indexing, `DisjointSlice`, block barriers, and the warp
-  primitives. It does *not* yet cover shared memory, because cuda-oxide spells that
-  `static mut SharedArray<T, N>` and one static cannot be per-block while Riri runs every
-  block at once. Use `ThreadCtx::shared` for those kernels meanwhile.
+  primitives. Shared memory is left out on purpose: their `SharedArray` is a zero-sized
+  marker whose storage the cuda-oxide compiler provides and whose accessors all panic
+  off-device, so Riri would have to supply storage and could only hand out references into
+  it with `unsafe`. Use `ThreadCtx::shared` for those kernels.
 - `cuda-device` is unpublished and pins a nightly toolchain, so Riri cannot depend on it and
   the shim is written from the published API reference rather than compiled against the real
   crate. Signatures can drift.
@@ -252,14 +253,12 @@ memory surface, which is enough to prove out the detection model and to test ker
 
 ## Roadmap
 
-1. **Shared memory in the shim.** cuda-oxide spells it `static mut SharedArray<T, N>`, and
-   one static cannot be per-block while Riri runs every block at once. Closing this needs
-   either `unsafe` or a deviation from that spelling, which is a decision rather than a
-   task.
+1. **Memory fences and weak memory** for global-memory communication, which Riri does not
+   model at all beyond atomics.
 2. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
    threads, applying Tree Borrows across lanes, so arbitrary `unsafe` in a kernel is checked
-   without rewriting it.
-3. **Memory fences and weak memory** for global-memory communication.
+   without rewriting it. It would also close the helper-location gap for free, since MIR
+   gives real program counters.
 
 Shipped: the warp model with shuffle convergence checks in v0.2, schedule exploration and
 shrinking in v0.3, the cuda-oxide shim in v0.4.

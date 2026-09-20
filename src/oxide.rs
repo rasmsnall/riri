@@ -41,11 +41,13 @@
 //!
 //! Not covered yet:
 //!
-//! - Shared memory. cuda-oxide declares it as `static mut SharedArray<T, N>`,
-//!   and one static cannot be per-block while Riri runs every block of a
-//!   launch at once. Giving each block its own instance needs either
-//!   `unsafe` or a deviation from that spelling, which is a decision rather
-//!   than an oversight. Use [`ThreadCtx::shared`] meanwhile.
+//! - Shared memory, deliberately. cuda-oxide's `SharedArray` is a zero-sized
+//!   marker: their compiler recognises the type and backs it with storage in
+//!   address space 3, and every accessor on it is `unreachable!` off-device.
+//!   Riri would have to supply storage of its own, and `Index` hands out
+//!   references into storage that starts uninitialised, which needs
+//!   `MaybeUninit` behind `unsafe`. Use [`ThreadCtx::shared`] instead, which
+//!   is checked exactly as the rest of Riri is.
 //! - 2D and tiled index spaces, the `_sync` shuffle forms, managed barriers,
 //!   clusters, and TMA.
 //!

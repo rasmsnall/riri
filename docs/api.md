@@ -4,7 +4,7 @@
 **Status** Complete. Describes the surface as built, at version 0.4.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.3
+**Version** 1.4
 **Date** 2026-09-20
 
 ---
@@ -598,9 +598,10 @@ therefore reported, which is the bug those forms invite.
 
 ### 5. What is not covered
 
-- **Shared memory.** cuda-oxide spells it `static mut SharedArray<T, N>`, and one static
-  cannot be per-block while Riri runs every block at once. Use `ThreadCtx::shared`
-  meanwhile. See `architecture.md`, Chapter IX, Section 5.
+- **Shared memory.** cuda-oxide's `SharedArray` is a zero-sized marker whose storage its
+  compiler provides and whose accessors all panic off-device, so Riri would have to supply
+  storage of its own, and handing out references into it would need `unsafe`. Left out
+  deliberately. Use `ThreadCtx::shared`. See `architecture.md`, Chapter IX, Section 5.
 - The `_sync` shuffle forms, 2D and tiled index spaces, managed barriers, clusters, TMA.
 - `cuda-device` is unpublished and pins a nightly toolchain, so this surface is written from
   the published API reference rather than compiled against the real crate. Treat a signature
