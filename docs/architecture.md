@@ -4,7 +4,7 @@
 **Status** Complete and implemented as described. Detection runs end to end for block and warp scopes, with schedule exploration and shrinking on top.
 **Audience** Anyone integrating, operating, or modifying this library. No prior context assumed.
 **Companion documents** `api.md` for the callable surface.
-**Version** 1.2
+**Version** 1.3
 **Date** 2026-09-20
 
 ---
@@ -47,11 +47,17 @@
   - 2. Recording and replaying a schedule
   - 3. Shrinking
   - 4. When shrinking cannot be trusted
-- IX. Assessment
+- IX. The cuda-oxide Shim
+  - 1. What it is for
+  - 2. Giving a context-free API a context
+  - 3. Handing out a mutable element
+  - 4. Carrying the caller's location
+  - 5. Shared memory, and why it is absent
+- X. Assessment
   - 1. Advantages
   - 2. Disadvantages
   - 3. Conditions under which this design is inappropriate
-- X. Dependencies
+- XI. Dependencies
 - References
 - Appendix A. Glossary
 
@@ -62,6 +68,7 @@
 - `<Table 5-1>` Warp collectives
 - `<Table 7-1>` Diagnostics
 - `<Table 8-1>` Outcomes of shrinking
+- `<Table 9-1>` Shim coverage
 
 ### List of Figures
 
@@ -126,8 +133,10 @@ In scope:
 Not in scope:
 
 - Executing on a GPU, or emitting PTX. Nothing here ever touches a driver.
-- Running cuda-oxide or rust-cuda kernel source unchanged. That is Roadmap item 1, and the
-  current stage is a library emulator, as recorded in Chapter IX, Section 2.
+- Running rust-cuda kernel source, or any surface other than Riri's own and the cuda-oxide
+  shim of Chapter IX. The shim covers cuda-oxide's indexing, `DisjointSlice`, barriers and
+  warp primitives, but not its shared memory, and it is written from the published API
+  reference rather than compiled against `cuda-device`.
 - Rust aliasing rules, such as Tree Borrows, across lanes. That requires MIR interpretation.
 - Performance modelling of any kind. Riri says nothing about occupancy, coalescing, or
   throughput.
@@ -156,6 +165,7 @@ threads: the cap is a resource limit, not a modelling one.
 | `warp.rs` | Warp collectives and mask validation |
 | `explore.rs` | Searching across seeds, and shrinking a failing schedule |
 | `diag.rs` | `Diagnostic`, `Report`, the de-duplicating reporter |
+| `oxide.rs` | The cuda-oxide shaped surface |
 | `dim.rs` | `Dim3` |
 
 `shadow.rs` is deliberately free of any scheduler dependency. It decides whether two
@@ -524,7 +534,89 @@ directly. See `api.md`, Chapter VII.
 
 ---
 
-## IX. Assessment
+## IX. The cuda-oxide Shim
+
+### 1. What it is for
+
+`crate::oxide` offers the surface a cuda-oxide kernel is written against, so such a kernel
+runs under Riri unchanged. Only the `#[kernel]` attribute differs between the two builds,
+and `cfg_attr` carries it on the GPU build alone, which is why Riri needs no proc macro and
+keeps its empty dependency list.
+
+The shim is not where the checking happens. It is an adapter onto the same instrumentation
+every other kernel uses, so everything in Chapters III to VI applies unchanged.
+
+Its value is narrower than it first appears. In Tier 1 the inputs are `&[T]`, which nothing
+writes during a launch, and the only write path is `DisjointSlice`, whose checked accessors
+give each thread a distinct index. Races there are impossible by construction and Riri adds
+nothing. Tier 2 is the point: `get_unchecked_mut` asserts that an index belongs to the
+calling thread alone, nothing on hardware checks it, and under Riri a second claim on the
+same element is an ordinary data race naming both lines.
+
+`<Table 9-1>` Shim coverage
+
+| Surface | State |
+|---|---|
+| `thread::index_1d`, `threadIdx_*`, `blockIdx_*`, `blockDim_*` | Covered |
+| `thread::sync_threads` | Covered |
+| `DisjointSlice::get_mut_indexed`, `get_mut`, `get_unchecked_mut`, `len` | Covered |
+| `warp` shuffles, votes, `lane_id`, `warp_id` | Covered, unsuffixed forms only |
+| `SharedArray`, `DynamicSharedArray` | Absent, see Section 5 |
+| 2D and tiled index spaces, managed barriers, clusters, TMA | Absent |
+
+### 2. Giving a context-free API a context
+
+A cuda-oxide kernel takes its identity from hardware registers, so `thread::index_1d()` is
+a free function with no context argument. Riri's own surface passes a `ThreadCtx`
+explicitly, and the shim has to bridge the two.
+
+It works because Riri gives each simulated GPU thread its own OS thread. A launch parks
+each thread's share of the state, an `Arc<LaunchState>` plus its indices, in a thread local,
+and every shim function rebuilds a `ThreadCtx` from it on demand.
+
+The `Arc` is what keeps this free of `unsafe`. Parking a `&ThreadCtx` would mean erasing a
+lifetime and storing a raw pointer; parking an owned handle does not. A guard clears the
+binding when the kernel returns, including by unwinding, so a device function called outside
+a launch gets a clear panic rather than another launch's state.
+
+### 3. Handing out a mutable element
+
+cuda-oxide's `get_mut` returns `&mut T`, and Riri keeps buffer contents behind a mutex, so
+it cannot hand out a reference into them and still record the access.
+
+`ElemMut` resolves this. It holds the mutex guard and implements `Deref` and `DerefMut`, so
+`*elem = x` works exactly as it reads while the access is recorded before the borrow is
+handed over. Holding the lock for the life of the borrow is sound here because only the
+thread holding the turn runs, so there is nobody to contend with. Holding one across a
+barrier would wedge the launch, which is documented rather than prevented.
+
+### 4. Carrying the caller's location
+
+Every shim function reaches Riri through a closure, and `#[track_caller]` does not survive
+one: a location captured inside the closure is a line in `oxide.rs`, not in the kernel.
+
+The first working version of the shim reported races inside Riri itself, which is useless
+when naming the line is the product. The instrumentation entry points therefore take a
+location rather than capturing one, and each shim function captures its own caller and
+passes it down. The same applies to `sync_threads` and to every warp collective, which is
+why `warp.rs` carries an `_at` variant of each public function.
+
+### 5. Shared memory, and why it is absent
+
+cuda-oxide declares shared memory as `static mut TILE: SharedArray<T, N>`. A static is one
+object, and Riri runs every block of a launch at once, so all blocks would share it. Correct
+behaviour needs one instance per block.
+
+Routing each access to per-block storage is straightforward. Returning a reference into it
+is not: `Index` and `IndexMut` on a static cannot borrow from per-block storage without
+either `unsafe` or a different spelling in the kernel source. Since one of those costs
+Riri's freedom from `unsafe` and the other costs the source compatibility the shim exists
+for, this is a decision to be taken deliberately rather than a task to be finished. Kernels
+needing shared memory use `ThreadCtx::shared` meanwhile.
+
+---
+
+## X. Assessment
 
 ### 1. Advantages
 
@@ -539,8 +631,11 @@ directly. See `api.md`, Chapter VII.
 
 ### 2. Disadvantages
 
-- Kernels must be written against Riri's API. Code cannot be moved under Riri without
-  being ported, which is the largest limitation and the reason Roadmap item 1 exists.
+- Kernels must be written against Riri's API or the cuda-oxide shim. Code using any other
+  surface cannot be moved under Riri without being ported.
+- The shim is written from cuda-oxide's published API reference rather than compiled against
+  `cuda-device`, which is unpublished and pins a nightly toolchain. Signatures can drift and
+  nothing here would notice.
 - One OS thread per simulated GPU thread caps launches at 16,384 threads and makes large
   launches slow.
 - A collective is identified by its source location, so a helper wrapping a collective
@@ -565,7 +660,7 @@ directly. See `api.md`, Chapter VII.
 
 ---
 
-## X. Dependencies
+## XI. Dependencies
 
 None. The library depends only on the Rust standard library, and has no dev-dependencies.
 This is a deliberate constraint: Riri is intended to be cheap to add to a CI job, and a

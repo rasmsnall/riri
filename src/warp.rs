@@ -184,8 +184,18 @@ pub fn shfl_sync<T: Copy + Send + 'static>(
     value: T,
     src_lane: u32,
 ) -> T {
+    shfl_sync_at(ctx, mask, value, src_lane, Location::caller())
+}
+
+pub(crate) fn shfl_sync_at<T: Copy + Send + 'static>(
+    ctx: &ThreadCtx<'_>,
+    mask: u32,
+    value: T,
+    src_lane: u32,
+    at: &'static Location<'static>,
+) -> T {
     let src = src_lane % ctx.warp_size();
-    shuffle(ctx, mask, "shfl_sync", Location::caller(), value, Some(src))
+    shuffle(ctx, mask, "shfl_sync", at, value, Some(src))
 }
 
 /// `__shfl_up_sync`: reads from the lane `delta` below this one.
@@ -198,8 +208,18 @@ pub fn shfl_up_sync<T: Copy + Send + 'static>(
     value: T,
     delta: u32,
 ) -> T {
+    shfl_up_sync_at(ctx, mask, value, delta, Location::caller())
+}
+
+pub(crate) fn shfl_up_sync_at<T: Copy + Send + 'static>(
+    ctx: &ThreadCtx<'_>,
+    mask: u32,
+    value: T,
+    delta: u32,
+    at: &'static Location<'static>,
+) -> T {
     let src = ctx.lane_id().checked_sub(delta);
-    shuffle(ctx, mask, "shfl_up_sync", Location::caller(), value, src)
+    shuffle(ctx, mask, "shfl_up_sync", at, value, src)
 }
 
 /// `__shfl_down_sync`: reads from the lane `delta` above this one.
@@ -212,8 +232,18 @@ pub fn shfl_down_sync<T: Copy + Send + 'static>(
     value: T,
     delta: u32,
 ) -> T {
+    shfl_down_sync_at(ctx, mask, value, delta, Location::caller())
+}
+
+pub(crate) fn shfl_down_sync_at<T: Copy + Send + 'static>(
+    ctx: &ThreadCtx<'_>,
+    mask: u32,
+    value: T,
+    delta: u32,
+    at: &'static Location<'static>,
+) -> T {
     let src = ctx.lane_id().checked_add(delta).filter(|&s| s < ctx.warp_size());
-    shuffle(ctx, mask, "shfl_down_sync", Location::caller(), value, src)
+    shuffle(ctx, mask, "shfl_down_sync", at, value, src)
 }
 
 /// `__shfl_xor_sync`: reads from the lane whose id is this one XOR
@@ -225,11 +255,21 @@ pub fn shfl_xor_sync<T: Copy + Send + 'static>(
     value: T,
     lane_mask: u32,
 ) -> T {
-    let src = Some(ctx.lane_id() ^ lane_mask).filter(|&s| s < ctx.warp_size());
-    shuffle(ctx, mask, "shfl_xor_sync", Location::caller(), value, src)
+    shfl_xor_sync_at(ctx, mask, value, lane_mask, Location::caller())
 }
 
-fn ballot(
+pub(crate) fn shfl_xor_sync_at<T: Copy + Send + 'static>(
+    ctx: &ThreadCtx<'_>,
+    mask: u32,
+    value: T,
+    lane_mask: u32,
+    at: &'static Location<'static>,
+) -> T {
+    let src = Some(ctx.lane_id() ^ lane_mask).filter(|&s| s < ctx.warp_size());
+    shuffle(ctx, mask, "shfl_xor_sync", at, value, src)
+}
+
+pub(crate) fn ballot(
     ctx: &ThreadCtx<'_>,
     mask: u32,
     pred: bool,
@@ -267,5 +307,9 @@ pub fn all_sync(ctx: &ThreadCtx<'_>, mask: u32, pred: bool) -> bool {
 /// but only when `mask` names the whole warp.
 #[track_caller]
 pub fn sync_warp(ctx: &ThreadCtx<'_>, mask: u32) {
-    collective(ctx, mask, "sync_warp", Location::caller(), (), |_| ())
+    sync_warp_at(ctx, mask, Location::caller())
+}
+
+pub(crate) fn sync_warp_at(ctx: &ThreadCtx<'_>, mask: u32, at: &'static Location<'static>) {
+    collective(ctx, mask, "sync_warp", at, (), |_| ())
 }

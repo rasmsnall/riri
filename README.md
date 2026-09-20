@@ -26,6 +26,12 @@ kernel -> simulated threads -> seeded scheduler -> shadow memory -> diagnostics
   that reproduces the finding on its own, with no seed involved. Often the answer is that
   no decisions are needed at all, which is itself worth knowing: the bug is not an exotic
   race, it is there whenever threads run in plain order.
+- **Runs cuda-oxide shaped kernels.** A kernel written against `cuda_device` runs under
+  Riri with its source unchanged, because the same free functions
+  (`thread::index_1d`, `DisjointSlice`, `warp::shuffle`) are provided here. The point is
+  Tier 2: `get_unchecked_mut` asserts an index is the calling thread's alone, nothing on
+  hardware verifies that, and under Riri two threads claiming one element is an ordinary
+  data race with both lines named. See [`riri::oxide`](docs/api.md).
 - **Understands warps, not just threads.** Warp collectives are rendezvous points. Every
   lane named by a member mask must reach the same collective with the same mask, and Riri
   checks that contract rather than trusting it. See [`docs/architecture.md`](docs/architecture.md),
@@ -59,6 +65,7 @@ until a compiler or architecture change removes it.
 | Shuffles reading a lane outside the mask | Yes |
 | Reads of uninitialised shared memory | Yes |
 | Out-of-bounds accesses and kernel panics, reported as traps | Yes |
+| cuda-oxide `get_unchecked_mut` claiming one element twice | Yes |
 | Rust aliasing violations, Tree Borrows across lanes | Not yet, see Roadmap |
 | Divergence between two call sites of one helper | Only if the helper is `#[track_caller]`, see Scope |
 
@@ -160,6 +167,32 @@ a seed, which also means it survives any later change to how seeds are drawn.
 does not depend on the values it reads; if a kernel carries state between runs, Riri says
 so rather than shrinking against noise.
 
+A kernel written for cuda-oxide runs with its source unchanged. Only the attribute differs,
+and `cfg_attr` carries that:
+
+```rust
+use riri::oxide::{self, DisjointSlice};
+use riri::{GlobalBuf, LaunchConfig};
+
+#[cfg_attr(not(riri), cuda_device::kernel)]
+fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    if let Some((mut c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
+    }
+}
+
+let out = GlobalBuf::new("c", vec![0.0f32; 64]);
+let c = DisjointSlice::new(&out);
+let report = oxide::launch(&LaunchConfig::new(2, 32), || vecadd(&a, &b, c.clone()));
+```
+
+The kernel takes its identity from free functions rather than a context argument, exactly as
+it does on the GPU, because each simulated thread parks its share of the launch in a thread
+local. Tier 1 code like this is race-free by construction and Riri has nothing to add. Tier 2
+is the point: `get_unchecked_mut` claims an index is the calling thread's alone, and under
+Riri two threads claiming one element is a data race with both lines named.
+
 ## Examples
 
 The first two run a correct kernel beside a buggy one and print both reports. The third
@@ -169,6 +202,7 @@ searches for a failing schedule and shrinks it:
 cargo run --example reduction     # block reduction, barrier removed from the loop
 cargo run --example warp_reduce   # warp reduction, shuffle hidden inside a branch
 cargo run --example shrink        # searching schedules, then shrinking the failing one
+cargo run --example oxide_kernel  # a cuda-oxide shaped kernel with a bad unchecked index
 ```
 
 ## Development
@@ -179,6 +213,7 @@ cargo test
 cargo run --example reduction
 cargo run --example warp_reduce
 cargo run --example shrink
+cargo run --example oxide_kernel
 ```
 
 These are exactly the gates CI runs, on stable and on 1.75, the declared minimum supported
@@ -186,12 +221,20 @@ version. There are no dependencies and no feature flags.
 
 ## Scope and limits
 
-Riri is at the *library emulator* stage. Kernels are written against Riri's API rather than
-compiled from cuda-oxide or rust-cuda source, which is enough to prove out the detection
-model and to test kernel *algorithms*, but is not yet the full Miri move.
+Riri interprets nothing. It executes kernels as ordinary Rust against an instrumented
+memory surface, which is enough to prove out the detection model and to test kernel
+*algorithms*, but is not yet the full Miri move.
 
-- Kernels must use Riri's types. It does not yet run cuda-oxide or rust-cuda source
-  unchanged. Closing that gap is Roadmap item 1.
+- Only what goes through Riri is checked: `GlobalBuf`, `SharedArray`, `DisjointSlice`, and
+  the warp collectives. A kernel that talks to itself through a captured `AtomicUsize` is
+  invisible and will be reported clean.
+- The cuda-oxide shim covers Tier 1 indexing, `DisjointSlice`, block barriers, and the warp
+  primitives. It does *not* yet cover shared memory, because cuda-oxide spells that
+  `static mut SharedArray<T, N>` and one static cannot be per-block while Riri runs every
+  block at once. Use `ThreadCtx::shared` for those kernels meanwhile.
+- `cuda-device` is unpublished and pins a nightly toolchain, so Riri cannot depend on it and
+  the shim is written from the published API reference rather than compiled against the real
+  crate. Signatures can drift.
 - A collective is identified by its source location, which is the call site thanks to
   `#[track_caller]`. Wrapping a collective in a helper of your own collapses every call site
   onto the helper's line, and two diverged groups calling that helper look to Riri like one
@@ -209,16 +252,17 @@ model and to test kernel *algorithms*, but is not yet the full Miri move.
 
 ## Roadmap
 
-1. **cuda-oxide API shim.** A `cuda_device`-compatible surface so the *same kernel source*
-   runs on the GPU and under Riri behind a `cfg` switch, and so
-   `DisjointSlice::get_unchecked_mut` uniqueness claims are validated at runtime.
+1. **Shared memory in the shim.** cuda-oxide spells it `static mut SharedArray<T, N>`, and
+   one static cannot be per-block while Riri runs every block at once. Closing this needs
+   either `unsafe` or a deviation from that spelling, which is a decision rather than a
+   task.
 2. **MIR-level interpretation.** The real Miri move: interpret the kernel's MIR with SIMT
    threads, applying Tree Borrows across lanes, so arbitrary `unsafe` in a kernel is checked
    without rewriting it.
 3. **Memory fences and weak memory** for global-memory communication.
 
 Shipped: the warp model with shuffle convergence checks in v0.2, schedule exploration and
-shrinking in v0.3.
+shrinking in v0.3, the cuda-oxide shim in v0.4.
 
 ## Documentation
 

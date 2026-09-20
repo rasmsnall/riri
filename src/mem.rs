@@ -1,7 +1,7 @@
 use std::any::Any;
-use std::ops::Add;
+use std::ops::{Add, Deref, DerefMut};
 use std::panic::Location;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::ctx::ThreadCtx;
 use crate::diag::{Access, AccessKind, Diagnostic, MemSpace};
@@ -136,6 +136,77 @@ impl<T: Copy + Send + Add<Output = T> + 'static> GlobalBuf<T> {
             *v = old + value;
             old
         })
+    }
+}
+
+/// A borrowed element of an instrumented buffer, held for as long as the
+/// caller keeps it.
+///
+/// This exists so a surface that hands out `&mut T`, as cuda-oxide's
+/// `DisjointSlice::get_mut` does, can be offered without Riri giving up
+/// either its instrumentation or its freedom from `unsafe`. The lock is held
+/// for the life of the borrow, which is sound here because only the thread
+/// holding the turn runs. Holding one across a barrier would wedge the
+/// launch, so do not.
+pub struct ElemMut<'a, T> {
+    guard: MutexGuard<'a, Instrumented<T>>,
+    index: usize,
+}
+
+impl<T> Deref for ElemMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.guard.data[self.index]
+    }
+}
+
+impl<T> DerefMut for ElemMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard.data[self.index]
+    }
+}
+
+impl<T: Copy + Send + 'static> GlobalBuf<T> {
+    /// Borrows one element for writing, recording the access first.
+    ///
+    /// `checked` decides what an out-of-range index means: `None` for a
+    /// bounds-checked surface, or a trap for an unchecked one.
+    ///
+    /// `location` is passed in rather than captured, because the caller is
+    /// usually reached through a closure and `#[track_caller]` does not
+    /// survive one. Reporting a race inside Riri instead of in the kernel
+    /// would defeat the point of reporting it at all.
+    pub(crate) fn elem_mut(
+        &self,
+        ctx: &ThreadCtx<'_>,
+        index: usize,
+        checked: bool,
+        location: &'static Location<'static>,
+    ) -> Option<ElemMut<'_, T>> {
+        ctx.schedule_point();
+
+        let acc = ctx.access(AccessKind::Write, location);
+        let mut m = self.mem.lock().unwrap();
+        if m.launch_id != ctx.launch_id() {
+            Self::reset(&mut m);
+            m.launch_id = ctx.launch_id();
+        }
+        let len = m.data.len();
+        if index >= len {
+            drop(m);
+            if checked {
+                return None;
+            }
+            ctx.trap(Diagnostic::OutOfBounds { space: self.space(), index, len, access: acc });
+        }
+
+        // Reporting takes a different lock, so this is safe to do while the
+        // element stays borrowed.
+        if let Some(first) = m.shadow[index].on_write(acc) {
+            ctx.report(Diagnostic::DataRace { space: self.space(), index, first, second: acc });
+        }
+        Some(ElemMut { guard: m, index })
     }
 }
 

@@ -1,10 +1,10 @@
 # riri: API Reference
 
 **Document type** Interface specification
-**Status** Complete. Describes the surface as built, at version 0.3.0.
+**Status** Complete. Describes the surface as built, at version 0.4.0.
 **Audience** Anyone writing kernels to run under Riri.
 **Companion documents** `architecture.md` for why the design is shaped this way.
-**Version** 1.2
+**Version** 1.3
 **Date** 2026-09-20
 
 ---
@@ -46,7 +46,13 @@
   - 3. `Exploration` and `Failure`
   - 4. `Schedule` and `replay`
   - 5. When shrinking declines
-- VIII. Worked Examples
+- VIII. The cuda-oxide Shim
+  - 1. `oxide::launch`
+  - 2. `thread`
+  - 3. `DisjointSlice`
+  - 4. `warp`
+  - 5. What is not covered
+- IX. Worked Examples
   - 1. A clean vector add
   - 2. A shared-memory reduction
   - 3. A warp reduction
@@ -61,6 +67,7 @@
 - `<Table 6-1>` `Report` methods
 - `<Table 7-1>` `Explore` options
 - `<Table 7-2>` `Shrink` outcomes
+- `<Table 8-1>` Shim surface
 
 ---
 
@@ -510,7 +517,98 @@ in-order schedule already reaches the bug.
 
 ---
 
-## VIII. Worked Examples
+## VIII. The cuda-oxide Shim
+
+`riri::oxide` provides the surface a cuda-oxide kernel is written against, so the same
+source runs under Riri. The attribute is the only difference, and `cfg_attr` carries it:
+
+```rust
+#[cfg_attr(not(riri), cuda_device::kernel)]
+fn vecadd(a: &[f32], b: &[f32], mut c: DisjointSlice<f32>) {
+    if let Some((mut c_elem, idx)) = c.get_mut_indexed() {
+        let i = idx.get();
+        *c_elem = a[i] + b[i];
+    }
+}
+```
+
+### 1. `oxide::launch`
+
+```rust
+pub fn launch<F>(config: &LaunchConfig, kernel: F) -> Report
+where
+    F: Fn() + Sync,
+```
+
+The closure takes no arguments, because the kernel finds its own identity through `thread`
+exactly as it does on the GPU. Call the kernel function inside it, passing whatever it takes
+by value:
+
+```rust
+let out = GlobalBuf::new("c", vec![0.0f32; 64]);
+let c = DisjointSlice::new(&out);
+let report = oxide::launch(&LaunchConfig::new(2, 32), || vecadd(&a, &b, c.clone()));
+```
+
+`DisjointSlice` is cheap to clone and shares its buffer, which is how each simulated thread
+receives its own handle the way a GPU kernel receives its own argument.
+
+Calling any device function outside a launch panics with a message saying so, rather than
+reading another launch's state.
+
+### 2. `thread`
+
+`<Table 8-1>` Shim surface
+
+| Item | Notes |
+|---|---|
+| `thread::index_1d()` | Returns an owned `ThreadIndex`, not copyable or sendable |
+| `thread::threadIdx_{x,y,z}()` | `u32`, as on the GPU |
+| `thread::blockIdx_{x,y,z}()`, `blockDim_{x,y,z}()`, `gridDim_x()` | `u32` |
+| `thread::warp_size()` | `warpSize` |
+| `thread::sync_threads()` | The block barrier, checked as in Chapter III |
+
+### 3. `DisjointSlice`
+
+```rust
+DisjointSlice::new(&buf)                     // wrap an instrumented GlobalBuf
+slice.get_mut_indexed() -> Option<(ElemMut<'_, T>, ThreadIndex<'_>)>
+slice.get_mut(idx)      -> Option<ElemMut<'_, T>>
+slice.get_unchecked_mut(i) -> ElemMut<'_, T>
+slice.len()
+```
+
+`ElemMut` derefs to `T`, so `*elem = value` reads as it does against cuda-oxide's `&mut T`.
+It holds a lock for the life of the borrow, which is fine because only one simulated thread
+runs at a time, but do not hold one across `sync_threads`.
+
+The checked accessors return `None` past the end, which is how a launch rounded up to whole
+blocks drops its tail. `get_unchecked_mut` traps instead, matching the unchecked contract,
+and is the one worth running under Riri: it asserts the index belongs to the calling thread
+alone, and two threads claiming one element is reported as a data race naming both lines.
+
+### 4. `warp`
+
+`lane_id`, `warp_id`, `shuffle`, `shuffle_up`, `shuffle_down`, `shuffle_xor` (each with an
+`_f32` form), `all`, `any`, `ballot`, `popc`.
+
+cuda-oxide's unsuffixed forms take no member mask, so Riri supplies the whole warp, which is
+what the instruction they lower to assumes. A warp that is not converged at one of these is
+therefore reported, which is the bug those forms invite.
+
+### 5. What is not covered
+
+- **Shared memory.** cuda-oxide spells it `static mut SharedArray<T, N>`, and one static
+  cannot be per-block while Riri runs every block at once. Use `ThreadCtx::shared`
+  meanwhile. See `architecture.md`, Chapter IX, Section 5.
+- The `_sync` shuffle forms, 2D and tiled index spaces, managed barriers, clusters, TMA.
+- `cuda-device` is unpublished and pins a nightly toolchain, so this surface is written from
+  the published API reference rather than compiled against the real crate. Treat a signature
+  mismatch as a bug in Riri.
+
+---
+
+## IX. Worked Examples
 
 ### 1. A clean vector add
 
@@ -606,6 +704,8 @@ fn the_flag_race_stays_fixed() {
 | `SharedArray` | Struct | root |
 | `Report` | Struct | root |
 | `explore`, `replay` | Functions | root |
+| `ElemMut` | Struct | root |
+| `launch`, `thread`, `warp`, `DisjointSlice`, `ThreadIndex` | cuda-oxide shim | `oxide` |
 | `Explore`, `Exploration`, `Failure`, `Schedule`, `Shrink` | Exploration types | root |
 | `Diagnostic` | Enum | root |
 | `LaneProblem` | Enum | root |

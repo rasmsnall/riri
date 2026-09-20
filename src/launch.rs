@@ -95,6 +95,24 @@ pub(crate) fn run<F>(config: &LaunchConfig, choices: Choices, kernel: F) -> (Rep
 where
     F: Fn(&ThreadCtx<'_>) + Sync,
 {
+    run_shared(config, choices, |_, ctx| kernel(ctx))
+}
+
+/// The launch body, handing each simulated thread both its context and a
+/// share of the launch state.
+///
+/// The `Arc` is what lets a context-free kernel surface work: a thread can
+/// park its share in a thread local and have free functions rebuild a
+/// [`ThreadCtx`] from it, with no raw pointers and no lifetime erasure. See
+/// [`crate::oxide`].
+pub(crate) fn run_shared<F>(
+    config: &LaunchConfig,
+    choices: Choices,
+    kernel: F,
+) -> (Report, Vec<u32>, bool)
+where
+    F: Fn(&Arc<LaunchState>, &ThreadCtx<'_>) + Sync,
+{
     let blocks = config.grid.count();
     let tpb = config.block.count();
     assert!(blocks > 0 && tpb > 0, "riri: grid and block must be non-empty");
@@ -112,7 +130,7 @@ where
     let ws = config.warp_size as usize;
     let warps_per_block = (tpb as usize).div_ceil(ws);
 
-    let state = LaunchState {
+    let state = Arc::new(LaunchState {
         id: NEXT_LAUNCH_ID.fetch_add(1, Ordering::Relaxed),
         config: *config,
         sched: Scheduler::new(blocks as usize, tpb as usize, ws, choices),
@@ -122,7 +140,7 @@ where
             .map(|_| WarpState { slots: Mutex::new((0..ws).map(|_| None).collect()) })
             .collect(),
         warps_per_block,
-    };
+    });
 
     std::thread::scope(|scope| {
         for gid in 0..total as usize {
@@ -145,9 +163,9 @@ where
     (report, trace, complete)
 }
 
-fn run_thread<F>(state: &LaunchState, kernel: &F, gid: usize)
+fn run_thread<F>(state: &Arc<LaunchState>, kernel: &F, gid: usize)
 where
-    F: Fn(&ThreadCtx<'_>) + Sync,
+    F: Fn(&Arc<LaunchState>, &ThreadCtx<'_>) + Sync,
 {
     let tpb = state.config.block.count() as usize;
     let ctx = ThreadCtx { launch: state, block: (gid / tpb) as u32, thread: (gid % tpb) as u32, gid };
@@ -155,7 +173,7 @@ where
     if state.sched.wait_turn(gid).is_err() {
         return;
     }
-    match catch_unwind(AssertUnwindSafe(|| kernel(&ctx))) {
+    match catch_unwind(AssertUnwindSafe(|| kernel(state, &ctx))) {
         Ok(()) => state.sched.finish(gid, &state.reporter),
         Err(payload) if payload.is::<AbortSignal>() => {}
         Err(payload) => {

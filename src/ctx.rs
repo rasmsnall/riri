@@ -80,7 +80,13 @@ impl<'l> ThreadCtx<'l> {
     /// barrier; otherwise Riri reports barrier divergence.
     #[track_caller]
     pub fn sync_threads(&self) {
-        let loc = Location::caller();
+        self.sync_threads_at(Location::caller());
+    }
+
+    /// `sync_threads` with the barrier's source location passed in, for
+    /// callers reached through a closure, where `#[track_caller]` does not
+    /// survive.
+    pub(crate) fn sync_threads_at(&self, loc: &'static Location<'static>) {
         if self.launch.sched.barrier(self.gid, loc, &self.launch.reporter).is_err() {
             std::panic::resume_unwind(Box::new(AbortSignal));
         }
